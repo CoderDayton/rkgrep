@@ -1,0 +1,42 @@
+[package]
+name = "rkgrep"
+version = "0.1.0"
+edition = "2021"
+description = "Ranked, span-scoped, budget-packed code search for a context window"
+license = "MIT"
+repository = "https://github.com/CoderDayton/rkgrep"
+readme = "README.md"
+keywords = ["grep", "search", "ripgrep", "code", "context"]
+categories = ["command-line-utilities", "text-processing"]
+
+[[bin]]
+name = "rkgrep"
+path = "src/main.rs"
+
+[dependencies]
+# ripgrep's own search engine, in-process: no subprocess, no serialization
+# round-trip, and line numbers arrive as integers rather than parsed text.
+grep-regex = "0.1"
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+ignore = "0.4"
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
