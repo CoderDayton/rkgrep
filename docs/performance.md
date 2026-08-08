@@ -1,0 +1,119 @@
+# Performance
+
+What a query costs, which part of it scales, and what caps the rest.
+
+- [Numbers](#numbers)
+- [The phase model](#the-phase-model)
+- [What scales](#what-scales)
+- [What does not](#what-does-not)
+- [Measured dead ends](#measured-dead-ends)
+- [Methodology](#methodology)
+
+## Numbers
+
+45k files, 1.2 GB, warm page cache, 32 cores, best of five:
+
+| Pattern | 1 thread | 4 | 8 | 16 | 32 | `rg -c` at 16 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `function` | 214 ms | 79 ms | 62 ms | 53 ms | 56 ms | 34 ms |
+| `Result` | 216 ms | 96 ms | 71 ms | 67 ms | 76 ms | 30 ms |
+| `config` | 221 ms | 94 ms | 76 ms | 70 ms | 73 ms | 30 ms |
+
+Single-threaded, rkgrep and ripgrep are within 20% of each other, and on
+`function` rkgrep is faster. At full width ripgrep pulls ahead, because more of
+its query is parallel.
+
+Peak is at 16 threads on a 32-core machine. Past that the serial fraction
+dominates and contention costs more than the extra workers return.
+
+Span extraction is not the cost. `--max-tokens 1` measures the same as a full
+budget, because spans are built only for files that could plausibly be
+returned.
+
+## The phase model
+
+```console
+$ rkgrep function ~/src --stats
+rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files read)
+```
+
+| Phase | Parallel | Work |
+| --- | --- | --- |
+| `walk` | yes | every file in the tree, searched |
+| `rank` | no | order candidates by signals the walk produced |
+| `extract` | yes, within a batch | read candidates, extract declarations, resolve line numbers |
+
+The two numbers in parentheses are the ones to read first. 15,526 files matched
+and 8 were read: if that ratio is close to 1, the query is not selective enough
+for ranking to help, and narrowing the path or the glob will beat any tuning.
+
+## What scales
+
+The walk scales **6.9× across 32 cores**, matching ripgrep, and always did. It
+is `ignore::WalkBuilder::build_parallel` with one searcher and one matcher per
+worker, collecting through a channel rather than a shared `Vec` behind a mutex.
+
+## What does not
+
+Ranking and extraction are serial with respect to the walk, and at full width
+they are roughly a third of a query. By Amdahl that caps overall scaling near
+4× however many cores are added.
+
+**Ranking** is 3–4 ms on 15k matching files and is no longer worth attacking.
+It was 55 ms until `path_score` — which lowercases a file name and splits it
+into a `Vec<String>` — stopped being called from inside a sort comparator that
+runs O(n log n) times.
+
+**Extraction** is the remaining floor. Its candidates run in parallel, one
+thread per file, so a batch costs what its largest member costs rather than the
+sum. On a JavaScript tree the largest member is routinely a megabyte of bundled
+output, and that single file sets the floor at ~13 ms no matter how many cores
+are available.
+
+Closing that means either giving up on huge single files — a size cut would
+change which spans come back — or splitting one file's extraction across
+threads, which is four sequential passes (read, mask, scan, search) over one
+buffer. Neither is obviously worth it while the walk is three times larger.
+
+## Measured dead ends
+
+Recorded so they are not tried again. Each was implemented and measured.
+
+| Change | Result |
+| --- | --- |
+| Memory mapping (`MmapChoice::auto()`) | 2× slower — per-file setup dominates when most files are small |
+| Reading each file once into a reused buffer | Slower — most files do not match, so full I/O plus UTF-8 validation for all of them costs more than re-reading the few that do |
+| `Mutex<Vec<_>>` → `mpsc` channel for collection | No measurable change |
+| Cloning the matcher per worker | No measurable change on this workload; kept, because it is correct and free |
+| Raising the thread count past 16 | Flat to slightly worse |
+
+Two of these were pursued on the theory that the scaling gap came from lock
+contention inside the regex crate's cache pool. A threaded simulation refuted
+it: drag at 32 threads was ~3× for the shared regex *and* for a plain byte
+scanner, which makes it a machine effect rather than a lock. The gap was the
+serial phases, which only phase-level instrumentation showed.
+
+The one change that survived from that line of work — replacing the
+declaration regex with a hand-written scan — is worth 12–23% single-threaded,
+for reasons unrelated to threading.
+
+## Methodology
+
+`bench/scaling.py` warms the page cache, then takes the best of five runs per
+thread count for both tools on identical input:
+
+```console
+python3 bench/scaling.py /path/to/tree
+python3 bench/scaling.py /path/to/tree --patterns Result --threads 1 16
+```
+
+Best-of rather than mean, because the distribution is one-sided: noise only
+ever makes a run slower.
+
+Two things will produce nonsense numbers:
+
+- **A tree larger than free page cache.** Single-threaded runs go I/O-bound
+  while parallel ones hide the latency, which reports impossible speedups. A
+  42 GB tree on a 61 GB machine showed 27 s at one thread and 0.16 s at four.
+- **Comparing against `rg` without `-c`.** Formatting and writing matched lines
+  is work rkgrep's scout does not do.
