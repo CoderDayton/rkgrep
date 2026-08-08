@@ -1,1 +1,34 @@
+# Build artifacts
 /target
+
+# Documentation (project-specific, not for version control)
+AGENTS.md
+CLAUDE.md
+docs/plans/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test and profiling artifacts
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Python (bench/)
+__pycache__/
+*.pyc
+.venv/
+
+# Local environment
+.env
+.env.local
