@@ -173,7 +173,7 @@ fn main() -> ExitCode {
     let _ = out.flush();
 
     if cli.stats {
-        let used: usize = hits.iter().map(|h| h.tokens).sum();
+        let used: usize = hits.iter().map(search::Hit::tokens).sum();
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         let budget = if cli.no_budget {
             "unlimited".to_string()

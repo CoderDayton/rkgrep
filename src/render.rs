@@ -27,7 +27,7 @@ pub fn render_text(hits: &[Hit], show_text: bool, color: bool) -> String {
         if let (Some(symbol), Some(kind)) = (&hit.symbol, &hit.kind) {
             out.push_str(&format!(" {dim}({kind} {symbol}){reset}"));
         }
-        out.push_str(&format!(" {dim}[{} tok]{reset}", hit.tokens));
+        out.push_str(&format!(" {dim}[{} tok]{reset}", hit.tokens()));
         out.push('\n');
         if show_text {
             out.push_str(&hit.text);

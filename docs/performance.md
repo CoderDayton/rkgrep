@@ -32,29 +32,27 @@ returned.
 
 ### What the token counter costs
 
-`--max-tokens` is denominated in real `o200k_base` tokens, and a tokenizer that
-builds its vocabulary at startup charges for that before answering anything:
-decoding 200k ranks and assembling an encoder takes **~55 ms**, every run,
-however small the query.
+`--max-tokens` is denominated in real `o200k_base` tokens, and a tokenizer
+assembled at startup charges for that before answering anything: decoding 200k
+ranks and building an encoder takes ~55 ms, and determinizing the split pattern
+several more — every run, however small the query.
 
-None of that survives into the binary. `build.rs` lays the vocabulary out at
-compile time and the process maps it: resolving the table is **31 ns**, and the
-only startup left is compiling the split pattern, at ~2 ms on a background
-thread while the walk runs.
+None of that survives into the binary. `build.rs` lays out both the vocabulary
+and the automaton that cuts text into pieces, and the process reads them where
+they sit: resolving the table is **31 ns**, and startup is validating the
+automaton image, on a background thread while the walk runs. The first count of
+a process costs **11 µs**.
 
-| Tree | Query | Runtime-built vocabulary | Pre-built |
-| --- | --- | --- | --- |
-| 1 file | `alpha` | 56.3 ms | **4.4 ms** |
-| 547 files | `Kill -w` | 56.9 ms | **16.4 ms** |
+Counting then runs at **105 MB/s**, split about evenly between cutting the
+pieces and looking each one up. Extraction records a span without counting it,
+and a span is counted only up to what the candidate budget still has room for,
+so a query pays for the spans that reach the result set and not for the hundred
+it discards.
 
-What remains on the 547-file query is counting itself, at ~76 MB/s over the
-spans extraction produces — the work the budget is made of, rather than a toll
-paid before it starts.
-
-The table costs 5.4 MB of the binary: 4 MiB of probe slots at a deliberate 0.5
-load factor, and 1.4 MB of token bytes. Halving the slots would halve that and
-lengthen every probe run, which is the wrong trade for the hottest lookup in
-the program.
+The images cost 8.1 MB of the binary: 4 MiB of probe slots at a deliberate 0.5
+load factor, 1.4 MB of token bytes, and 2.7 MB of automaton. Halving the slots
+would halve the first and lengthen every probe run, which is the wrong trade
+for the hottest lookup in the program.
 
 ## The phase model
 

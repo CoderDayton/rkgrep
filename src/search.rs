@@ -13,6 +13,7 @@
 //! 4. spans rank across the whole result set, declarations first
 //! 5. results pack under a token budget and come back with anchors
 
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -27,7 +28,7 @@ use ignore::WalkBuilder;
 use serde::Serialize;
 
 use crate::spans::{declaration_name, declarations, enclosing, identifier_tokens, Declaration};
-use crate::tokenizer::count as count_tokens;
+use crate::tokenizer::{count as count_tokens, count_capped};
 
 /// A match on a declaration line is the strongest signal available: it is the
 /// difference between where something is defined and one of forty places it is
@@ -85,7 +86,7 @@ const MAX_MATCH_LINES_PER_FILE: usize = 512;
 /// almost every file and declares almost none of them.
 const HINT_SCAN_LINES: usize = 16;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Hit {
     pub path: String,
     pub start_line: u64,
@@ -96,7 +97,8 @@ pub struct Hit {
     pub is_declaration: bool,
     /// Nesting depth of the declaration this span came from; 0 for top level.
     pub depth: usize,
-    pub tokens: usize,
+    /// Filled on demand by [`Hit::tokens`], never at construction.
+    tokens: OnceCell<usize>,
     pub score: f64,
     pub text: String,
 }
@@ -104,6 +106,38 @@ pub struct Hit {
 impl Hit {
     pub fn anchor(&self) -> String {
         format!("{}:{}-{}", self.path, self.start_line, self.end_line)
+    }
+
+    /// What this span costs against the budget.
+    ///
+    /// Extraction produces spans by the hundred and the budget admits a
+    /// handful, so counting one at construction spends most of the query on
+    /// spans that are then discarded. The packer asks in score order and stops
+    /// when the budget is full, which is the only order in which the question
+    /// is worth answering.
+    pub fn tokens(&self) -> usize {
+        *self.tokens.get_or_init(|| count_tokens(&self.text))
+    }
+}
+
+/// Written out rather than derived, so `tokens` is the count and not the cell
+/// that may or may not be holding it yet.
+impl Serialize for Hit {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut hit = serializer.serialize_struct("Hit", 11)?;
+        hit.serialize_field("path", &self.path)?;
+        hit.serialize_field("start_line", &self.start_line)?;
+        hit.serialize_field("end_line", &self.end_line)?;
+        hit.serialize_field("symbol", &self.symbol)?;
+        hit.serialize_field("kind", &self.kind)?;
+        hit.serialize_field("match_lines", &self.match_lines)?;
+        hit.serialize_field("is_declaration", &self.is_declaration)?;
+        hit.serialize_field("depth", &self.depth)?;
+        hit.serialize_field("tokens", &self.tokens())?;
+        hit.serialize_field("score", &self.score)?;
+        hit.serialize_field("text", &self.text)?;
+        hit.end()
     }
 }
 
@@ -585,7 +619,7 @@ fn spans_for_file(
             match_lines: region.matched,
             is_declaration: region.is_declaration,
             depth: region.depth,
-            tokens: count_tokens(&text),
+            tokens: OnceCell::new(),
             score,
             text,
         });
@@ -701,7 +735,20 @@ pub fn search(pattern: &str, root: &Path, opts: &Options) -> Result<(Vec<Hit>, T
                     timings.read_files += 1;
                 }
                 for hit in file_hits {
-                    gathered += hit.tokens;
+                    // The gate below is `gathered >= budget` and nothing else
+                    // reads the total, so a span is counted only up to what is
+                    // still missing: the sum crosses the budget on exactly the
+                    // span it would have crossed on. A count that came in
+                    // under its cap is the real one, so the packer inherits
+                    // it; the rest go uncounted until it asks.
+                    let missing = budget.map_or(0, |b| b.saturating_sub(gathered));
+                    if missing > 0 {
+                        let counted = count_capped(&hit.text, missing);
+                        gathered += counted;
+                        if counted < missing {
+                            let _ = hit.tokens.set(counted);
+                        }
+                    }
                     hits.push(hit);
                 }
             }
@@ -782,10 +829,10 @@ fn pack(hits: Vec<Hit>, opts: &Options) -> Vec<Hit> {
         }
         // A span too large for what is left is skipped and the walk continues,
         // so one oversized declaration cannot truncate the result set.
-        if opts.max_tokens.is_some_and(|max| used + hit.tokens > max) {
+        if opts.max_tokens.is_some_and(|max| used + hit.tokens() > max) {
             continue;
         }
-        used += hit.tokens;
+        used += hit.tokens();
         per_file.insert(hit.path.clone(), count + 1);
         packed.push(hit);
         if opts.max_tokens.is_some_and(|max| used >= max) {

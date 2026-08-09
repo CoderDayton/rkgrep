@@ -12,7 +12,8 @@ use base64::Engine;
 use riptoken::CoreBPE;
 use rustc_hash::FxHashMap;
 
-use super::{count, table, Vocabulary, SPLIT_PATTERN, VOCAB};
+use super::pattern::SPLIT_PATTERN;
+use super::{count, table, Vocabulary, VOCAB};
 
 /// The published ranks, read from the source tree rather than the built image,
 /// so a test failure separates a bad table from a bad lookup.
@@ -57,6 +58,28 @@ fn assert_matches_reference(text: &str) {
         REFERENCE.encode_ordinary(text).len(),
         "count disagrees with tiktoken for {text:?}"
     );
+}
+
+#[test]
+fn the_anchored_start_state_does_not_depend_on_context() {
+    // `split` resolves the start state once and reuses it for every piece,
+    // which only holds while no alternative can read what came before it.
+    use regex_automata::dfa::Automaton;
+    use regex_automata::{Anchored, Input};
+
+    let haystack = "a b\n1_\u{300}\u{4e2d}!";
+    let expected = *super::ANCHORED_START;
+    for at in 0..=haystack.len() {
+        if !haystack.is_char_boundary(at) {
+            continue;
+        }
+        let input = Input::new(haystack).anchored(Anchored::Yes).range(at..);
+        assert_eq!(
+            super::SPLITTER.start_state_forward(&input),
+            Ok(expected),
+            "the start state at byte {at} is not the one `split` reuses"
+        );
+    }
 }
 
 #[test]
@@ -135,6 +158,13 @@ fn whitespace_runs_match_the_reference() {
         "   \n",
         "def f():\n    return 1\n\n\n",
         "x = {\n    'k': 1,\n}\n   ",
+        // Vertical tab and form feed are blanks to `\s` but not to every
+        // ASCII-whitespace predicate, and a run opening with one still has to
+        // give its last character back.
+        "\u{0b} y",
+        "\u{0b}\u{0b}x",
+        "\u{0c} y",
+        "a\u{0b} \u{0b}b",
     ] {
         assert_matches_reference(text);
     }

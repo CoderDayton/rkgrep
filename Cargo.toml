@@ -30,6 +30,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [build-dependencies]
+# Determinizes the split pattern; the binary only reads the result.
+regex-automata = { version = "0.4", features = ["dfa-build"] }
 # Decodes the published o200k_base ranks while building the token table. Only
 # the built table ships; nothing here is linked into the binary.
 base64 = "0.22"

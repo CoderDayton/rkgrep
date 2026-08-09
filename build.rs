@@ -1,35 +1,87 @@
-//! Turns the `o200k_base` vocabulary into the table the tokenizer memory-maps.
+//! Turns the `o200k_base` vocabulary and split pattern into the images the
+//! tokenizer reads straight out of the binary.
 //!
 //! Doing this here rather than at startup is the whole point: the released
-//! binary carries a finished hash table, and the first token count costs a
-//! bounds check and a load instead of decoding 200k base64 lines and building
-//! a `HashMap`.
+//! binary carries a finished hash table and a finished automaton, and the
+//! first token count costs a bounds check and a load instead of decoding 200k
+//! base64 lines, building a `HashMap`, and determinizing a unicode pattern.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
+use regex_automata::dfa::{dense, Automaton};
+use regex_automata::nfa::thompson;
+use regex_automata::util::start::Config as StartConfig;
+use regex_automata::{Anchored, MatchKind};
 
 #[path = "src/tokenizer/table.rs"]
 mod table;
 
+#[path = "src/tokenizer/pattern.rs"]
+mod pattern;
+
 /// The published `<base64-token> <rank>` ranks.
 const VOCAB: &str = "src/o200k_base.tiktoken";
 
-/// Where the built image lands, under `OUT_DIR`.
+/// Where the built vocabulary image lands, under `OUT_DIR`.
 const IMAGE: &str = "o200k_base.bin";
+
+/// Where the built automaton lands, under `OUT_DIR`.
+const DFA_IMAGE: &str = "split_dfa.bin";
 
 fn main() {
     println!("cargo:rerun-if-changed={VOCAB}");
     println!("cargo:rerun-if-changed=src/tokenizer/table.rs");
+    println!("cargo:rerun-if-changed=src/tokenizer/pattern.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
     let vocab = std::fs::read(VOCAB).unwrap_or_else(|e| panic!("reading {VOCAB}: {e}"));
     let entries = parse(&vocab);
     let image = build(&entries);
 
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join(IMAGE);
+    let dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let out = dir.join(IMAGE);
     write(&out, &image).unwrap_or_else(|e| panic!("writing {}: {e}", out.display()));
+
+    let out = dir.join(DFA_IMAGE);
+    write(&out, &split_dfa()).unwrap_or_else(|e| panic!("writing {}: {e}", out.display()));
+}
+
+/// The split pattern, determinized and serialized.
+///
+/// Anchored only: `split` asks whether a piece starts at the cursor, never
+/// where the next one begins, and dropping the unanchored start states takes
+/// the image down with them. Leftmost-first because the pattern's alternatives
+/// are ordered -- the first one that matches is the piece, which is what
+/// tiktoken's engine does.
+///
+/// The bytes are written in the *target's* endianness, not the host's, so a
+/// cross-compiled binary reads its own image rather than panicking on every
+/// count.
+fn split_dfa() -> Vec<u8> {
+    let dfa = dense::Builder::new()
+        .configure(
+            dense::Config::new()
+                .match_kind(MatchKind::LeftmostFirst)
+                .start_kind(regex_automata::dfa::StartKind::Anchored),
+        )
+        .thompson(thompson::Config::new().shrink(true))
+        .build(pattern::SPLIT_PATTERN)
+        .expect("the split pattern is a literal constant");
+    // A DFA that cannot start anchored would search every position instead of
+    // the cursor, which is a correctness difference, not a slow path.
+    dfa.start_state(&StartConfig::new().anchored(Anchored::Yes))
+        .expect("the anchored start state is the one this DFA was built for");
+
+    let target_endian =
+        std::env::var("CARGO_CFG_TARGET_ENDIAN").expect("cargo sets CARGO_CFG_TARGET_ENDIAN");
+    let (bytes, padding) = match target_endian.as_str() {
+        "big" => dfa.to_bytes_big_endian(),
+        "little" => dfa.to_bytes_little_endian(),
+        other => panic!("unknown target endianness {other}"),
+    };
+    bytes[padding..].to_vec()
 }
 
 /// Every `<base64-token> <rank>` line, decoded.
