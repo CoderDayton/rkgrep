@@ -11,20 +11,20 @@ What a query costs, which part of it scales, and what caps the rest.
 
 ## Numbers
 
-45k files, 1.2 GB, warm page cache, 32 cores, best of five:
+68k files, warm page cache, 32 cores, median of seven runs:
 
 | Pattern | 1 thread | 4 | 8 | 16 | 32 | `rg -c` at 16 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `function` | 214 ms | 79 ms | 62 ms | 53 ms | 56 ms | 34 ms |
-| `Result` | 216 ms | 96 ms | 71 ms | 67 ms | 76 ms | 30 ms |
-| `config` | 221 ms | 94 ms | 76 ms | 70 ms | 73 ms | 30 ms |
+| `function` | 333 ms | 118 ms | 83 ms | 70 ms | 66 ms | 45 ms |
+| `Result` | 329 ms | 118 ms | 85 ms | 67 ms | 65 ms | 43 ms |
+| `config` | 321 ms | 103 ms | 70 ms | 53 ms | 54 ms | 42 ms |
 
-Single-threaded, rkgrep and ripgrep are within 20% of each other, and on
-`function` rkgrep is faster. At full width ripgrep pulls ahead, because more of
-its query is parallel.
+Single-threaded, rkgrep and ripgrep are within 5% of each other, and on
+`function` rkgrep is faster. At full width ripgrep pulls ahead by 25–55%,
+because more of its query is parallel.
 
-Peak is at 16 threads on a 32-core machine. Past that the serial fraction
-dominates and contention costs more than the extra workers return.
+The curve is flat from 16 threads on a 32-core machine: past that the serial
+fraction dominates and extra workers return nothing.
 
 Span extraction is not the cost. `--max-tokens 1` measures the same as a full
 budget, because spans are built only for files that could plausibly be
@@ -56,8 +56,8 @@ worker, collecting through a channel rather than a shared `Vec` behind a mutex.
 ## What does not
 
 Ranking and extraction are serial with respect to the walk, and at full width
-they are roughly a third of a query. By Amdahl that caps overall scaling near
-4× however many cores are added.
+they are roughly a third of a query. By Amdahl that caps overall scaling around
+5–6× however many cores are added, against ripgrep's 7.6× on the same tree.
 
 **Ranking** is 3–4 ms on 15k matching files and is no longer worth attacking.
 It was 55 ms until `path_score` — which lowercases a file name and splits it
@@ -99,16 +99,22 @@ for reasons unrelated to threading.
 
 ## Methodology
 
-`bench/scaling.py` warms the page cache, then takes the best of five runs per
-thread count for both tools on identical input:
+The `scaling` benchmark warms the page cache, then times both tools as
+subprocesses on identical input, so the numbers include process startup and are
+what a user would time at a shell. It drives the release binary, so build that
+first.
 
 ```console
-python3 bench/scaling.py /path/to/tree
-python3 bench/scaling.py /path/to/tree --patterns Result --threads 1 16
+cargo build --release
+cargo bench --bench scaling -- /path/to/tree
+cargo bench --bench scaling -- /path/to/tree --patterns Result --threads 1 16
 ```
 
-Best-of rather than mean, because the distribution is one-sided: noise only
-ever makes a run slower.
+Each cell is the median of `--repeats` trials with a 95% bootstrap confidence
+interval, and each pattern reports the worst relative spread across its cells.
+Median rather than mean because the distribution is one-sided — noise only ever
+makes a run slower — and an interval rather than a bare best-of because a cell
+whose spread is wide is not a measurement, and the table should say so.
 
 Two things will produce nonsense numbers:
 

@@ -28,6 +28,7 @@ const KEYWORDS: &[&str] = &[
     "impl",
     "interface",
     "macro",
+    "mod",
     "module",
     "namespace",
     "record",
@@ -35,6 +36,7 @@ const KEYWORDS: &[&str] = &[
     "struct",
     "trait",
     "type",
+    "var",
 ];
 
 /// Qualifiers that may precede a declaration keyword. The keyword must open
@@ -199,8 +201,18 @@ fn scan_keyword_declaration(line: &str) -> Option<(&str, &str)> {
         if i == start {
             break;
         }
-        words[count] = &line[start..i];
+        let word = &line[start..i];
+        words[count] = word;
         count += 1;
+        // A qualifier may carry a scope: Rust writes `pub(crate) fn`, and
+        // without skipping the parenthesized part the run ends on the `(` and
+        // the declaration is missed entirely.
+        if bytes.get(i) == Some(&b'(') && is_modifier(word) {
+            match close_paren(bytes, i) {
+                Some(end) => i = end,
+                None => break,
+            }
+        }
         // Words must be separated by blanks; anything else ends the run.
         let after = i;
         i = skip_blanks(bytes, i);

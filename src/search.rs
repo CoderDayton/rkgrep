@@ -18,6 +18,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
@@ -69,10 +70,11 @@ const CANDIDATE_CHUNK: usize = 256;
 
 /// Matched lines recorded per file before the searcher moves on.
 ///
-/// At most `max_per_file` spans are ever returned from one file, so recording
-/// thousands of match positions in a single file buys nothing. A common term
-/// in a large tree matches hundreds of thousands of lines, and the per-line
-/// callback is the walk's hot path.
+/// A budget caps what one file can contribute, so recording thousands of match
+/// positions in a single file buys nothing. A common term in a large tree
+/// matches hundreds of thousands of lines, and the per-line callback is the
+/// walk's hot path. With no budget the cap is lifted instead: dropping the
+/// 513th match of a file is exactly what `--no-budget` promises not to do.
 const MAX_MATCH_LINES_PER_FILE: usize = 512;
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,7 +120,12 @@ pub struct Timings {
 
 #[derive(Debug, Clone)]
 pub struct Options {
-    pub max_tokens: usize,
+    /// Token budget the whole result set must fit, or `None` to return every
+    /// ranked span. Without a budget rkgrep stands in for `rg`: nothing is
+    /// dropped for size, and extraction runs on every matching file rather
+    /// than only on the ones that could plausibly be returned.
+    pub max_tokens: Option<usize>,
+    /// Cap on spans from any one file; 0 means no cap.
     pub max_per_file: usize,
     pub globs: Vec<String>,
     pub literal: bool,
@@ -132,7 +139,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            max_tokens: 2000,
+            max_tokens: Some(2000),
             max_per_file: 3,
             globs: Vec::new(),
             literal: false,
@@ -314,7 +321,28 @@ fn merge_regions(mut regions: Vec<Region>) -> Vec<Region> {
     merged
 }
 
-fn regions_for(decls: &[Declaration], lines: &[u64], total_lines: u64) -> Vec<Region> {
+/// Whether this span declares the thing that was searched for.
+///
+/// The match landing on a declaration's first line is not enough. In
+/// `const a = store.createProject(...)` the match sits on the first line of a
+/// declaration, but the declaration is `a` — a local binding that merely calls
+/// the symbol. Counting that as a declaration hands the unconditional
+/// declaration bonus to every caller written on one line, and a test file full
+/// of them then outranks the file that actually declares the name.
+///
+/// So the pattern has to match the declared name itself. Applying the same
+/// matcher keeps the test honest for regex patterns and for `-w`, under which
+/// `createProject` no longer claims `createProjectManager`.
+fn declares_query(matcher: &RegexMatcher, name: Option<&str>) -> bool {
+    name.is_some_and(|name| matcher.is_match(name.as_bytes()).unwrap_or(false))
+}
+
+fn regions_for(
+    decls: &[Declaration],
+    lines: &[u64],
+    total_lines: u64,
+    matcher: &RegexMatcher,
+) -> Vec<Region> {
     let mut sorted = lines.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
@@ -345,7 +373,7 @@ fn regions_for(decls: &[Declaration], lines: &[u64], total_lines: u64) -> Vec<Re
         {
             Some(existing) => existing.matched.push(line),
             None => {
-                let is_declaration = symbol.is_some() && start == line;
+                let is_declaration = start == line && declares_query(matcher, symbol.as_deref());
                 regions.push(Region {
                     start,
                     end,
@@ -375,11 +403,16 @@ fn build_matcher(pattern: &str, opts: &Options) -> Result<RegexMatcher> {
 /// Only candidates reach this, so precise line numbers are paid for on the
 /// handful of files that can actually be returned rather than on every file
 /// that happened to match.
-fn matched_lines(searcher: &mut Searcher, matcher: &RegexMatcher, content: &str) -> Vec<u64> {
+fn matched_lines(
+    searcher: &mut Searcher,
+    matcher: &RegexMatcher,
+    content: &str,
+    limit: usize,
+) -> Vec<u64> {
     let mut lines = Vec::new();
     let sink = UTF8(|line_number, _| {
         lines.push(line_number);
-        Ok(lines.len() < MAX_MATCH_LINES_PER_FILE)
+        Ok(lines.len() < limit)
     });
     let _ = searcher.search_slice(matcher, content.as_bytes(), sink);
     lines
@@ -495,7 +528,12 @@ fn relative_path(root: &Path, path: &Path) -> String {
 /// Pulled out of the candidate loop so a batch of candidates can be turned
 /// into spans on several threads at once: each call touches only its own file
 /// and returns an owned result.
-fn spans_for_file(candidate: &Candidate, matcher: &RegexMatcher, terms: &[String]) -> Vec<Hit> {
+fn spans_for_file(
+    candidate: &Candidate,
+    matcher: &RegexMatcher,
+    terms: &[String],
+    max_match_lines: usize,
+) -> Vec<Hit> {
     let file = &candidate.file;
     let Ok(content) = std::fs::read_to_string(&file.absolute) else {
         return Vec::new();
@@ -507,13 +545,13 @@ fn spans_for_file(candidate: &Candidate, matcher: &RegexMatcher, terms: &[String
     let total_lines = lines.len() as u64;
     let decls = declarations(&content);
     let mut searcher = SearcherBuilder::new().line_number(true).build();
-    let match_lines = matched_lines(&mut searcher, matcher, &content);
+    let match_lines = matched_lines(&mut searcher, matcher, &content, max_match_lines);
     if match_lines.is_empty() {
         return Vec::new();
     }
 
     let mut hits = Vec::new();
-    for region in regions_for(&decls, &match_lines, total_lines) {
+    for region in regions_for(&decls, &match_lines, total_lines, matcher) {
         let from = (region.start.saturating_sub(1)) as usize;
         let to = (region.end as usize).min(lines.len());
         if from >= to {
@@ -545,11 +583,16 @@ fn spans_for_file(candidate: &Candidate, matcher: &RegexMatcher, terms: &[String
 /// The files in a batch are independent, and one of them is routinely a
 /// megabyte of bundled JavaScript while the rest are ordinary source, so the
 /// batch costs what its largest member costs rather than the sum.
-fn spans_for_batch(batch: &[Candidate], matcher: &RegexMatcher, terms: &[String]) -> Vec<Vec<Hit>> {
+fn spans_for_batch(
+    batch: &[Candidate],
+    matcher: &RegexMatcher,
+    terms: &[String],
+    max_match_lines: usize,
+) -> Vec<Vec<Hit>> {
     if batch.len() < 2 {
         return batch
             .iter()
-            .map(|c| spans_for_file(c, matcher, terms))
+            .map(|c| spans_for_file(c, matcher, terms, max_match_lines))
             .collect();
     }
     // A batch is at most `MIN_CANDIDATE_FILES`, so one thread per file needs
@@ -560,7 +603,7 @@ fn spans_for_batch(batch: &[Candidate], matcher: &RegexMatcher, terms: &[String]
             .map(|candidate| {
                 // A matcher per worker: see the note in `collect_matches`.
                 let matcher = matcher.clone();
-                scope.spawn(move || spans_for_file(candidate, &matcher, terms))
+                scope.spawn(move || spans_for_file(candidate, &matcher, terms, max_match_lines))
             })
             .collect();
         workers
@@ -598,14 +641,26 @@ pub fn search(pattern: &str, root: &Path, opts: &Options) -> Result<(Vec<Hit>, T
     timings.rank = started.elapsed();
 
     let started = Instant::now();
-    let budget = opts.max_tokens.saturating_mul(CANDIDATE_SLACK);
+    // Without a budget every matching file is a candidate: there is no size
+    // for extraction to stop at, and stopping early would silently drop
+    // matches that were asked for.
+    let budget = opts
+        .max_tokens
+        .map(|max| max.saturating_mul(CANDIDATE_SLACK));
+    let exhausted = |examined: usize, gathered: usize| {
+        examined >= MIN_CANDIDATE_FILES && budget.is_some_and(|b| gathered >= b)
+    };
+    let max_match_lines = match opts.max_tokens {
+        Some(_) => MAX_MATCH_LINES_PER_FILE,
+        None => usize::MAX,
+    };
     let mut gathered = 0usize;
     let mut hits: Vec<Hit> = Vec::new();
 
     let mut examined = 0usize;
     let mut start = 0usize;
     'passes: while start < ranked.len() {
-        if examined >= MIN_CANDIDATE_FILES && gathered >= budget {
+        if exhausted(examined, gathered) {
             break;
         }
         let end = (start + CANDIDATE_CHUNK).min(ranked.len());
@@ -626,7 +681,7 @@ pub fn search(pattern: &str, root: &Path, opts: &Options) -> Result<(Vec<Hit>, T
                 1
             };
             let batch = &ranked[at..at + batch_len];
-            for file_hits in spans_for_batch(batch, &matcher, &terms) {
+            for file_hits in spans_for_batch(batch, &matcher, &terms, max_match_lines) {
                 if !file_hits.is_empty() {
                     timings.read_files += 1;
                 }
@@ -637,7 +692,7 @@ pub fn search(pattern: &str, root: &Path, opts: &Options) -> Result<(Vec<Hit>, T
             }
             examined += batch_len;
             at += batch_len;
-            if examined >= MIN_CANDIDATE_FILES && gathered >= budget {
+            if exhausted(examined, gathered) {
                 break 'passes;
             }
         }
@@ -707,16 +762,18 @@ fn pack(hits: Vec<Hit>, opts: &Options) -> Vec<Hit> {
     let mut packed = Vec::new();
     for hit in hits {
         let count = per_file.get(&hit.path).copied().unwrap_or(0);
-        if count >= opts.max_per_file {
+        if opts.max_per_file > 0 && count >= opts.max_per_file {
             continue;
         }
-        if used + hit.tokens > opts.max_tokens {
+        // A span too large for what is left is skipped and the walk continues,
+        // so one oversized declaration cannot truncate the result set.
+        if opts.max_tokens.is_some_and(|max| used + hit.tokens > max) {
             continue;
         }
         used += hit.tokens;
         per_file.insert(hit.path.clone(), count + 1);
         packed.push(hit);
-        if used >= opts.max_tokens {
+        if opts.max_tokens.is_some_and(|max| used >= max) {
             break;
         }
     }

@@ -48,12 +48,18 @@ cannot begin a literal mid-character.
 
 **Keyword** is the common case: zero or more qualifiers (`pub`, `async`,
 `export`, `static`, …) followed by a declaring keyword (`fn`, `def`, `class`,
-`struct`, `interface`, …) followed by the name. Qualifiers are consumed
+`struct`, `interface`, `mod`, `var`, …) followed by the name. Qualifiers are consumed
 greedily and then given back one at a time, because `const` and `static` are
 both qualifier and keyword — `const static x` declares `x`, not `static`.
 
 The keyword must open its line. Otherwise `from enum import Enum` reads as
 declaring a symbol named `import`.
+
+A qualifier may carry a parenthesized scope: `pub(crate) fn`, `pub(super)
+struct`, `pub(in crate::util) fn`. The group is skipped and the run continues,
+because ending it at the `(` would reject the whole line. Only a qualifier gets
+this — skipping parentheses after any word would read `if (ready(x)) {` as a
+declaration.
 
 **Receiver** exists because Go puts the receiver between the keyword and the
 name, so the keyword rule — which wants the name next — sees nothing at all.

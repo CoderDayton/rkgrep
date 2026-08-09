@@ -106,6 +106,14 @@ The final sort puts **declarations first, unconditionally**, then score, then
 path and start line. Letting a file that mentions X twenty times outrank the
 one that defines it is how a ranker loses to a one-line grep.
 
+A span counts as a declaration when the match lands on a declaration's first
+line *and the pattern matches the declared name*. Both halves are needed: in
+`const a = store.createProject(...)` the match is on a declaration's first
+line, but the declaration is `a`, so the span is a caller and not an answer to
+"where is `createProject`". Applying the same matcher to the name keeps this
+right for regex patterns, and under `-w` stops `createProject` from claiming
+`createProjectManager`.
+
 The depth term is charged only against a declaration that a shallower
 declaration of the same name is competing with. Penalizing depth across the
 board costs coverage without improving the answer — measured, see
@@ -140,4 +148,4 @@ crowded module from taking everything.
 | `src/render.rs` | text and JSON output |
 | `src/spans_tests.rs` | unit tests for extraction |
 | `tests/search.rs` | integration tests over the built binary |
-| `bench/` | quality and scaling harnesses |
+| `benches/` | quality and scaling harnesses |

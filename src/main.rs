@@ -21,6 +21,9 @@ enum ColorChoice {
     Never,
 }
 
+/// Spans from any one file, when a token budget is in force.
+const DEFAULT_MAX_PER_FILE: usize = 3;
+
 const AFTER_HELP: &str = "\
 EXAMPLES:
   rkgrep validate_token              rank every hit, pack 2000 tokens
@@ -28,6 +31,7 @@ EXAMPLES:
   rkgrep -t 8000 -g '*.py' Config    bigger budget, Python files only
   rkgrep --json parse_url | jq .     machine-readable output
   rkgrep -l TODO                     anchors only, no source text
+  rkgrep -A validate_token           every ranked span, no budget
 
 The pattern is ripgrep's, unchanged, so ripgrep regex syntax applies. What
 rkgrep adds is ranking the hits, expanding each to the declaration around it,
@@ -52,9 +56,14 @@ struct Cli {
     #[arg(short = 't', long, default_value_t = 2000, value_name = "N")]
     max_tokens: usize,
 
-    /// Cap spans returned from any one file
-    #[arg(long, default_value_t = 3, value_name = "N")]
-    max_per_file: usize,
+    /// Return every ranked span: no token budget, and no per-file cap unless
+    /// --max-per-file says otherwise
+    #[arg(short = 'A', long, conflicts_with = "max_tokens")]
+    no_budget: bool,
+
+    /// Cap spans returned from any one file, 0 for no cap [default: 3]
+    #[arg(long, value_name = "N")]
+    max_per_file: Option<usize>,
 
     /// Restrict to matching files (repeatable, e.g. -g '*.rs')
     #[arg(short = 'g', long = "glob", value_name = "GLOB")]
@@ -114,8 +123,15 @@ fn main() -> ExitCode {
     };
 
     let opts = Options {
-        max_tokens: cli.max_tokens,
-        max_per_file: cli.max_per_file,
+        max_tokens: (!cli.no_budget).then_some(cli.max_tokens),
+        // A budget is what makes a per-file cap necessary: it stops one
+        // crowded module taking the whole of it. With no budget to protect,
+        // capping only hides matches the user asked for.
+        max_per_file: cli.max_per_file.unwrap_or(if cli.no_budget {
+            0
+        } else {
+            DEFAULT_MAX_PER_FILE
+        }),
         globs: cli.globs.clone(),
         literal: cli.fixed_strings,
         word: cli.word_regexp,
@@ -154,11 +170,16 @@ fn main() -> ExitCode {
     if cli.stats {
         let used: usize = hits.iter().map(|h| h.tokens).sum();
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let budget = if cli.no_budget {
+            "unlimited".to_string()
+        } else {
+            cli.max_tokens.to_string()
+        };
         eprintln!(
             "rkgrep: {} spans, {}/{} tokens, {:.1}ms total",
             hits.len(),
             used,
-            cli.max_tokens,
+            budget,
             started.elapsed().as_secs_f64() * 1e3,
         );
         eprintln!(

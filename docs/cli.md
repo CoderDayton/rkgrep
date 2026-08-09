@@ -20,7 +20,8 @@ or directory and defaults to the current one.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-t, --max-tokens N` | 2000 | budget for the whole result set |
-| `--max-per-file N` | 3 | cap spans from any one file |
+| `-A, --no-budget` | off | return every ranked span, no budget and no per-file cap |
+| `--max-per-file N` | 3 | cap spans from any one file; 0 for no cap |
 | `-g, --glob GLOB` | — | restrict to matching files, repeatable |
 | `-F, --fixed-strings` | off | treat the pattern as a literal string |
 | `-w, --word-regexp` | off | match whole words only |
@@ -36,6 +37,15 @@ or directory and defaults to the current one.
 Tokens are counted as identifier and number runs — one unit per run, a single
 byte scan. It is an estimate, close enough to a real tokenizer to budget
 against.
+
+`--no-budget` turns the budget off entirely: every ranked span comes back, and
+extraction runs on every matching file rather than only on the ones that could
+fit. Use it when rkgrep is standing in for `rg` and dropping a match is worse
+than a long result — ranking, span expansion and merging all still apply, so
+the output is ordered and deduplicated rather than raw. It also lifts the
+per-file cap, which exists only to stop one crowded module taking a budget;
+passing `--max-per-file N` alongside it puts a cap back. `--no-budget` and
+`-t` are mutually exclusive, so a run can never claim both.
 
 ## Output
 

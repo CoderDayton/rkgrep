@@ -31,6 +31,26 @@ serde_json = "1"
 tempfile = "3"
 serde_json = "1"
 
+# Ground truth for the quality benchmark. Third-party parsers, so rkgrep's
+# extractor is never scored against its own notion of a declaration.
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+
+# Both benchmarks drive the release binary and `rg` as subprocesses and report
+# aggregates over repeated trials, which criterion's sampling model does not
+# express, so they bring their own harness.
+[[bench]]
+name = "quality"
+harness = false
+
+[[bench]]
+name = "scaling"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -223,3 +223,140 @@ fn literal_mode_disables_regex_syntax() {
     let hits = json_hits(dir.path(), &["a.b(c)", "-F", "-g", "lit.py", "-t", "500"]);
     assert_eq!(hits.as_array().expect("array").len(), 1, "{hits}");
 }
+
+/// A caller written as a one-line binding is not a declaration of the callee.
+///
+/// `const a = store.createProject(...)` puts the match on the first line of a
+/// declaration — but of `a`, not of `createProject`. Treating that as a
+/// declaration gives the unconditional declaration bonus to every such caller,
+/// and a file full of them buries the file that declares the name.
+#[test]
+fn a_binding_that_calls_the_symbol_does_not_rank_as_its_declaration() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        dir.path().join("api.ts"),
+        "export function createProject(name) {\n  return { name };\n}\n",
+    )
+    .expect("write");
+    fs::write(
+        dir.path().join("uses.test.ts"),
+        "test('one', () => {\n\
+         const a = store.createProject({ name: 'A' });\n\
+         const b = store.createProject({ name: 'B' });\n\
+         });\n",
+    )
+    .expect("write");
+
+    let hits = json_hits(dir.path(), &["createProject", "-w", "-t", "1000"]);
+    let first = &hits[0];
+    assert_eq!(first["symbol"], "createProject", "hits: {hits}");
+    assert_eq!(first["is_declaration"], true, "hits: {hits}");
+    assert!(
+        first["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("api.ts"),
+        "the declaring file should rank first, hits: {hits}"
+    );
+}
+
+/// Under `-w`, a longer name that merely contains the pattern is a different
+/// symbol and must not claim the declaration bonus.
+#[test]
+fn a_longer_name_containing_the_pattern_is_not_its_declaration() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        dir.path().join("mgr.ts"),
+        "export function createProjectManager(opts) {\n  return opts;\n}\n",
+    )
+    .expect("write");
+    fs::write(
+        dir.path().join("api.ts"),
+        "export function createProject(name) {\n  return { name };\n}\n",
+    )
+    .expect("write");
+
+    let hits = json_hits(dir.path(), &["createProject", "-w", "-t", "1000"]);
+    let declaring: Vec<&str> = hits
+        .as_array()
+        .map(|hits| {
+            hits.iter()
+                .filter(|h| h["is_declaration"] == true)
+                .filter_map(|h| h["symbol"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(declaring, vec!["createProject"], "hits: {hits}");
+}
+
+/// Without a budget nothing is dropped for size, which is what standing in
+/// for `rg` requires.
+#[test]
+fn no_budget_returns_more_than_a_tight_budget() {
+    let dir = tree();
+    let tight = json_hits(dir.path(), &["def", "-t", "40"]);
+    let all = json_hits(dir.path(), &["def", "--no-budget"]);
+
+    let tokens = |hits: &serde_json::Value| -> u64 {
+        hits.as_array()
+            .map(|hits| hits.iter().filter_map(|h| h["tokens"].as_u64()).sum())
+            .unwrap_or(0)
+    };
+    assert!(
+        tokens(&all) > 40,
+        "an unbudgeted run should exceed a 40-token budget: {all}"
+    );
+    assert!(
+        all.as_array().map(Vec::len).unwrap_or(0) > tight.as_array().map(Vec::len).unwrap_or(0),
+        "tight: {tight}\nall: {all}"
+    );
+}
+
+/// The per-file cap exists to stop one module taking a budget. With no budget
+/// to protect, it only hides matches — so it lifts with it.
+#[test]
+fn no_budget_lifts_the_per_file_cap_but_an_explicit_one_still_wins() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut crowded = String::new();
+    for i in 0..8 {
+        crowded.push_str(&format!("def handler_{i}(req):\n    return {i}\n\n"));
+    }
+    fs::write(dir.path().join("crowded.py"), &crowded).expect("write");
+
+    let uncapped = json_hits(dir.path(), &["handler_", "--no-budget"]);
+    assert!(
+        uncapped.as_array().map(Vec::len).unwrap_or(0) > 3,
+        "the default cap of 3 should not apply: {uncapped}"
+    );
+
+    let capped = json_hits(
+        dir.path(),
+        &["handler_", "--no-budget", "--max-per-file", "2"],
+    );
+    assert_eq!(
+        capped.as_array().map(Vec::len).unwrap_or(0),
+        2,
+        "an explicit cap outranks the flag: {capped}"
+    );
+}
+
+/// The per-file match-line cap is a budget optimization, so it lifts with the
+/// budget. A file with more matches than the cap must still report all of them.
+#[test]
+fn no_budget_reports_matches_past_the_per_file_match_line_cap() {
+    const DECLARATIONS: usize = 700;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut source = String::new();
+    for i in 0..DECLARATIONS {
+        source.push_str(&format!("def handler_{i}(req):\n    return {i}\n\n"));
+    }
+    fs::write(dir.path().join("many.py"), &source).expect("write");
+
+    let hits = json_hits(dir.path(), &["handler_", "--no-budget"]);
+    assert_eq!(
+        hits.as_array().map(Vec::len).unwrap_or(0),
+        DECLARATIONS,
+        "every declaration should come back"
+    );
+}

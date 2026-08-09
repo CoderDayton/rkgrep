@@ -260,3 +260,35 @@ fn a_file_that_does_not_indent_reports_everything_at_top_level() {
     let src = "int a(void) {\n  return 1;\n}\nint b(void) {\n  return 2;\n}\n";
     assert!(declarations(src).iter().all(|d| d.depth == 0));
 }
+
+#[test]
+fn rust_module_declarations_are_found() {
+    // `mod` opens a Rust module, and a bare `mod name;` is the whole
+    // declaration. Missing it costs the file that declares a module the top
+    // rank for that module's name.
+    let src = "mod file;\npub mod io;\npub(crate) mod std;\n";
+    assert_eq!(names(src), vec!["file", "io", "std"]);
+}
+
+#[test]
+fn a_parenthesized_visibility_does_not_end_the_qualifier_run() {
+    // `pub(crate)` is one qualifier, not a word followed by a call. Reading
+    // the `(` as the end of the run rejects the whole line, which loses every
+    // crate-visible declaration in a Rust file.
+    let src = "pub(crate) unsafe trait Link {}\n";
+    assert_eq!(names(src), vec!["Link"]);
+
+    let src = "pub(in crate::util) fn helper() {}\n";
+    assert_eq!(names(src), vec!["helper"]);
+
+    let src = "pub(super) struct Inner;\n";
+    assert_eq!(names(src), vec!["Inner"]);
+}
+
+#[test]
+fn a_call_after_a_non_qualifier_still_ends_the_run() {
+    // Only a qualifier may carry a scope. Skipping parentheses after any word
+    // would make `if (ready(x)) {` look like a declaration of `x`.
+    assert_eq!(names("if (ready(x)) {\n}\n"), Vec::<String>::new());
+    assert_eq!(names("while (next(it)) {\n}\n"), Vec::<String>::new());
+}
