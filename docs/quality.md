@@ -62,18 +62,20 @@ actually returns.
 
 | Corpus | System | MRR (definition) | Definition in budget | Neighborhood in budget |
 | --- | --- | --- | --- | --- |
-| Python, 98 files | `rg -C 10` | 0.996 | 100.0% | 92.6% |
-| | **rkgrep** | **1.000** | **100.0%** | **96.4%** |
-| TypeScript, 162 files | `rg -C 10` | 0.962 | 96.7% | 92.8% |
-| | **rkgrep** | **0.976** | **100.0%** | **97.7%** |
-| Go, 902 files | `rg -C 10` | 0.957 | 97.5% | 91.2% |
-| | **rkgrep** | 0.954 | **98.3%** | **93.0%** |
-| Rust, 547 files | `rg -C 10` | **0.908** | 96.7% | 81.4% |
-| | **rkgrep** | 0.887 | 96.7% | **89.0%** |
+| Python, 168 files | `rg -C 10` | 0.986 | 95.8% | 80.3% |
+| | **rkgrep** | **0.996** | **100.0%** | **86.6%** |
+| TypeScript, 164 files | `rg -C 10` | 0.956 | 95.0% | 84.6% |
+| | **rkgrep** | **0.960** | **100.0%** | **95.6%** |
+| Go, 902 files | `rg -C 10` | 0.957 | 94.2% | 84.2% |
+| | **rkgrep** | 0.954 | **97.5%** | **87.1%** |
+| Rust, 547 files | `rg -C 10` | 0.908 | 88.3% | 68.9% |
+| | **rkgrep** | **0.947** | **98.3%** | **80.2%** |
 
-On ranking rkgrep leads on Python and TypeScript, ties on Go, and trails on
-Rust. On what survives the budget it leads on TypeScript and Go and ties on
-Python and Rust.
+On ranking rkgrep leads on Python, TypeScript and Rust, and ties on Go. On what
+survives the budget it leads on all four, by 3.3 to 10 points — the budget is
+denominated in `o200k_base` tokens and charged to both systems the same way, so
+what separates them is how much of it each spends on lines that answer the
+query.
 
 Query latency is reported alongside the table by the harness, but what a query
 costs against ripgrep is [performance](performance.md)'s question, measured
@@ -81,12 +83,20 @@ there on a tree large enough for the answer to mean something.
 
 ## Where ranking is weakest
 
-Rust is the one corpus where the baseline still ranks the declaring file
-higher. Its declarations carry the most text between the line's first word and
-the name — `pub(crate) unsafe trait`, `impl<T: Clone> Trait for Type` — and its
-methods live one level down inside `impl` blocks, so a name is more often
-declared at two depths at once. That is also why the depth term below is worth
-more on Rust than anywhere else.
+Go is the one corpus where the baseline still ranks the declaring file higher,
+by 0.003.
+
+Rust exercises the extractor hardest. Its declarations carry the most text
+between the line's first word and the name — `pub(crate) unsafe trait`,
+`impl<T: Clone> Trait for Type` — and its methods live one level down inside
+`impl` blocks, so a name is more often declared at two depths at once. That is
+also why the depth term below is worth more on Rust than anywhere else.
+
+What it still loses there is ambiguity no text scan can settle. `mod barrier;`
+is written in two files, and only one is the answer: the other is inside a
+`cfg_sync! { … }` block, which the grammar reads as a macro call rather than a
+module, so it never enters the ground truth. Both lines declare a module named
+`barrier` and nothing in either line says which.
 
 The signature shape, which recognizes a declaration from a name followed by a
 parameter list, is the one that trades precision for reach. Its three guards
@@ -103,14 +113,15 @@ Setting that weight to zero, same corpora and queries:
 
 | Corpus | MRR with the penalty | MRR without |
 | --- | --- | --- |
-| Python | 1.000 | 1.000 |
-| TypeScript | **0.976** | 0.920 |
+| Python | 0.996 | 0.988 |
+| TypeScript | **0.960** | 0.926 |
 | Go | 0.954 | 0.954 |
-| Rust | **0.887** | 0.843 |
+| Rust | **0.947** | 0.902 |
 
 Definition-in-budget and neighborhood-in-budget do not move on any of the four.
 
-The term earns its place on Rust and TypeScript and is inert on Python and Go.
+The term earns its place on Rust and TypeScript, barely registers on Python and
+is inert on Go.
 It fires only when one name is declared at two different depths, which `impl`
 blocks and nested arrow functions make routine and which the Python and Go
 corpora barely produce — so a change to it will look free unless Rust or

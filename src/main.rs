@@ -3,6 +3,7 @@
 mod render;
 mod search;
 mod spans;
+mod tokenizer;
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -113,6 +114,10 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let started = Instant::now();
+    // Parsing 200k BPE ranks takes longer than a small query's whole search.
+    // Started here, it builds while the parallel walk runs and is ready by the
+    // time the serial extract phase counts its first span.
+    tokenizer::prewarm();
 
     let root = match search::validate_root(&cli.path) {
         Ok(root) => root,

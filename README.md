@@ -7,28 +7,26 @@
 Ranked, span-scoped, budget-packed code search. ripgrep answers *which lines
 match*; rkgrep answers *what should be read*.
 
-Every match expands to the declaration containing it, the declarations are
-ranked, and the result set is packed to fit a token budget — so the output is
-whole functions in a size you choose, for reading unfamiliar code or filling a
-model's context window. It links ripgrep's own engine in-process
-(`grep-searcher`, `grep-regex`, `ignore`), so the pattern and its regex syntax
-are ripgrep's, unchanged. Against `rg -C 10` charged for the lines it returns,
-rkgrep fits the declaring file into a 2000-token budget as often or more often
-on all four measured languages, and fits more of the files that reference the
-symbol on every one of them, by up to 8 points — see [Quality](#quality). It is
-slower than ripgrep on a wide query over a large tree, and it drops matches by
-design; both are structural, not tuning — see
-[when not to use this](#when-not-to-use-this).
+Point it at a symbol and you get whole declarations back: the function or class
+each match sits in, ranked best first and packed into a token budget you set. A
+context window's worth, or less. Underneath it is ripgrep, linked in-process,
+so the pattern and its regex syntax are unchanged.
+
+In a 2000-token budget it fits the file that declares your symbol as reliably
+as `rg -C 10` does, and more of the files that use it (see
+[Quality](#quality)). It is slower than plain ripgrep on a wide search, and it
+leaves matches out on purpose; [when not to use this](#when-not-to-use-this)
+covers both.
 
 ```console
 $ rkgrep validate_token
-src/auth/service.rs:142-159 (fn validate_token) [88 tok]
+src/auth/service.rs:142-159 (fn validate_token) [187 tok]
 pub fn validate_token(token: &str) -> Result<Claims> {
     let claims = decode(token)?;
     ...
 }
 
-src/api/middleware.rs:61-74 (fn require_auth) [64 tok]
+src/api/middleware.rs:61-74 (fn require_auth) [142 tok]
 async fn require_auth(req: Request) -> Result<Response> {
     let claims = validate_token(req.header("authorization")?)?;
     ...
@@ -37,7 +35,7 @@ async fn require_auth(req: Request) -> Result<Response> {
 
 Docs: [CLI](docs/cli.md) · [Architecture](docs/architecture.md) ·
 [Extraction](docs/extraction.md) · [Performance](docs/performance.md) ·
-[Quality](docs/quality.md)
+[Quality](docs/quality.md) · [Contributing](CONTRIBUTING.md)
 
 ## Features
 
@@ -45,13 +43,15 @@ Docs: [CLI](docs/cli.md) · [Architecture](docs/architecture.md) ·
   mentions it twenty times.
 - A match expands to its declaration rather than ±N lines, and overlapping
   regions merge, so no line is sent twice.
-- Spans pack under `--max-tokens` best-first — 2000 by default, at most 3 per
-  file, so one crowded module cannot take the budget.
-- Four declaration shapes and no parser per language — keyword, receiver,
-  signature, and callable-bound-to-a-name — cover Rust, Go, Python, C, C++,
-  Java, C#, JavaScript, TypeScript, Ruby, PHP, and shell. Comments and string
-  literals are masked first, so a declaration written inside a docstring is
-  never reported. See [Extraction](docs/extraction.md).
+- Spans pack under `--max-tokens` best-first: 2000 by default, at most 3 per
+  file, so one crowded module cannot take the budget. The budget is counted in
+  `o200k_base` tokens from a bundled vocabulary — the same unit the context
+  window it is meant for charges.
+- Four declaration shapes (keyword, receiver, signature, and
+  callable-bound-to-a-name) cover Rust, Go, Python, C, C++, Java, C#,
+  JavaScript, TypeScript, Ruby, PHP, and shell, with no parser per language.
+  Comments and string literals are masked first, so a declaration written
+  inside a docstring is never reported. See [Extraction](docs/extraction.md).
 - Declarations carry a nesting depth taken from indentation, which separates
   the `save` a module declares from the `save` an unrelated class has.
 
@@ -98,10 +98,6 @@ for again. [docs/cli.md](docs/cli.md) has every flag and the JSON schema.
 | You need every match | `rkgrep --no-budget`, or `rg` | The default fills a budget and stops; `--no-budget` returns every ranked span instead. `rg` is still faster if ordering and span expansion buy you nothing. |
 | Counting, listing, piping to a script | `rg -c`, `rg -l` | Ranking and span extraction do work a count throws away. |
 | Prose, logs, config, data | `rg -C` | Extraction looks for declarations. A file with none falls back to fixed windows, which is what `rg -C` already gives you. |
-| "Go to definition" for a name declared in several places | an editor's LSP, or an index (`rust-analyzer`, `gopls`, `ctags`) | Ranking is lexical and there is no symbol table. Depth separates a module-level `save` from a method; nothing separates two methods named `save` in different files. |
-
-Each of these follows from the current design: ranking whole declarations under
-a budget, with no index and no parser.
 
 ## Performance
 
@@ -132,24 +128,24 @@ declarations ranked first and charged for the lines it returns:
 
 | Corpus | | MRR (definition) | Definition in budget | Neighborhood in budget |
 | --- | --- | --- | --- | --- |
-| Python | `rg -C 10` | 0.996 | 100.0% | 92.6% |
-| | **rkgrep** | **1.000** | **100.0%** | **96.4%** |
-| TypeScript | `rg -C 10` | 0.962 | 96.7% | 92.8% |
-| | **rkgrep** | **0.976** | **100.0%** | **97.7%** |
-| Go | `rg -C 10` | 0.957 | 97.5% | 91.2% |
-| | **rkgrep** | 0.954 | **98.3%** | **93.0%** |
-| Rust | `rg -C 10` | **0.908** | 96.7% | 81.4% |
-| | **rkgrep** | 0.887 | 96.7% | **89.0%** |
+| Python | `rg -C 10` | 0.986 | 95.8% | 80.3% |
+| | **rkgrep** | **0.996** | **100.0%** | **86.6%** |
+| TypeScript | `rg -C 10` | 0.956 | 95.0% | 84.6% |
+| | **rkgrep** | **0.960** | **100.0%** | **95.6%** |
+| Go | `rg -C 10` | 0.957 | 94.2% | 84.2% |
+| | **rkgrep** | 0.954 | **97.5%** | **87.1%** |
+| Rust | `rg -C 10` | 0.908 | 88.3% | 68.9% |
+| | **rkgrep** | **0.947** | **98.3%** | **80.2%** |
 
 Reproduce with `cargo bench --bench quality -- <repo> --lang <lang>`. The last
 column counts files that textually reference the name, so it rewards returning
 more files rather than better ones. [docs/quality.md](docs/quality.md) has the
 ground-truth construction and the limits of each metric.
 
-## Development
+## Contributing
 
 ```console
-cargo test                              # 46 tests: 28 unit, 18 integration
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo build --release                   # both benchmarks drive this binary
@@ -157,12 +153,10 @@ cargo bench --bench quality -- <repo> --lang rust
 cargo bench --bench scaling -- <tree>
 ```
 
-Both benchmarks need a repository to run against; the quality one needs sources
-in `python`, `typescript`, `javascript`, `go`, or `rust`. Run it on more than
-one language for any change to ranking or extraction — the metrics move in
-opposite directions, and terms that are inert on one language carry another.
-`--show-failures N` lists the queries where the baseline ranks the declaration
-higher.
+The first three have to pass before a pull request, and a change to ranking or
+extraction should carry a quality run on more than one language.
+[CONTRIBUTING.md](CONTRIBUTING.md) has what the benchmarks need and the
+invariants that are not obvious from the code.
 
 ## License
 

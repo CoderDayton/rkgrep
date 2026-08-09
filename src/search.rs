@@ -26,9 +26,8 @@ use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use serde::Serialize;
 
-use crate::spans::{
-    declarations, enclosing, estimate_tokens, identifier_tokens, line_is_declaration, Declaration,
-};
+use crate::spans::{declaration_name, declarations, enclosing, identifier_tokens, Declaration};
+use crate::tokenizer::count as count_tokens;
 
 /// A match on a declaration line is the strongest signal available: it is the
 /// difference between where something is defined and one of forty places it is
@@ -76,6 +75,15 @@ const CANDIDATE_CHUNK: usize = 256;
 /// walk's hot path. With no budget the cap is lifted instead: dropping the
 /// 513th match of a file is exactly what `--no-budget` promises not to do.
 const MAX_MATCH_LINES_PER_FILE: usize = 512;
+
+/// Matched lines checked for a declaration of the query before the walk gives
+/// up on the hint for that file.
+///
+/// A file that declares the query and mentions it later declares it in one of
+/// its first few matches. Scanning every match instead costs the walk a fifth
+/// of its time on a term like `Result`, which appears on a declaration line in
+/// almost every file and declares almost none of them.
+const HINT_SCAN_LINES: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
@@ -221,20 +229,26 @@ fn term_overlap(text: &str, terms: &[String]) -> f64 {
 /// that genuinely does not need them has to be written out. This phase only
 /// decides which files are worth opening; exact positions are resolved later,
 /// per candidate, by [`matched_lines`].
-struct ScoutSink {
+struct ScoutSink<'a> {
+    matcher: &'a RegexMatcher,
     matches: usize,
     declaration_hint: bool,
 }
 
-impl Sink for ScoutSink {
+impl Sink for ScoutSink<'_> {
     type Error = std::io::Error;
 
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
-        // Only until one is found: the declaration regex carries a large
-        // alternation and this runs on every matched line in the tree.
-        if !self.declaration_hint {
+        // Only until one is found, and only over the first
+        // `HINT_SCAN_LINES` matches: the declaration scan runs on every
+        // matched line in the tree.
+        //
+        // The name has to match the query, exactly as it does once the file is
+        // read; see `declares_query` for why a match landing on a
+        // declaration line is not enough on its own.
+        if !self.declaration_hint && self.matches < HINT_SCAN_LINES {
             if let Ok(line) = std::str::from_utf8(mat.bytes()) {
-                self.declaration_hint = line_is_declaration(line);
+                self.declaration_hint = declares_query(self.matcher, declaration_name(line));
             }
         }
         self.matches += 1;
@@ -278,7 +292,7 @@ struct FileMatches {
     path: String,
     absolute: PathBuf,
     match_count: usize,
-    /// Any matched line that looks like a declaration on its own.
+    /// Any matched line that declares the query on its own.
     declaration_hint: bool,
 }
 
@@ -485,6 +499,7 @@ fn collect_matches(
             // files in a tree do not match, and paying full I/O plus UTF-8
             // validation for all of them dwarfs a second read of a handful.
             let mut sink = ScoutSink {
+                matcher: &matcher,
                 matches: 0,
                 declaration_hint: false,
             };
@@ -570,7 +585,7 @@ fn spans_for_file(
             match_lines: region.matched,
             is_declaration: region.is_declaration,
             depth: region.depth,
-            tokens: estimate_tokens(&text),
+            tokens: count_tokens(&text),
             score,
             text,
         });

@@ -104,13 +104,6 @@ fn enclosing_returns_none_above_the_first_declaration() {
 }
 
 #[test]
-fn token_estimates_count_identifier_runs() {
-    assert_eq!(estimate_tokens(""), 1); // never free
-    assert_eq!(estimate_tokens("fn validate_token() {}"), 2);
-    assert_eq!(estimate_tokens("a b c"), 3);
-}
-
-#[test]
 fn identifier_tokens_split_every_common_case() {
     assert_eq!(identifier_tokens("validateToken"), ["validate", "token"]);
     assert_eq!(identifier_tokens("validate_token"), ["validate", "token"]);
@@ -121,10 +114,10 @@ fn identifier_tokens_split_every_common_case() {
 
 #[test]
 fn line_declaration_hint_matches_the_full_extractor() {
-    assert!(line_is_declaration("def handler(request):"));
-    assert!(line_is_declaration("    pub fn new() -> Self {"));
-    assert!(!line_is_declaration("    return validate_token(x)"));
-    assert!(!line_is_declaration("from enum import Enum"));
+    assert_eq!(declaration_name("def handler(request):"), Some("handler"));
+    assert_eq!(declaration_name("    pub fn new() -> Self {"), Some("new"));
+    assert_eq!(declaration_name("    return validate_token(x)"), None);
+    assert_eq!(declaration_name("from enum import Enum"), None);
 }
 
 #[test]
@@ -283,6 +276,35 @@ fn a_parenthesized_visibility_does_not_end_the_qualifier_run() {
 
     let src = "pub(super) struct Inner;\n";
     assert_eq!(names(src), vec!["Inner"]);
+}
+
+#[test]
+fn a_visibility_scope_is_not_read_as_a_parameter_list() {
+    // `pub(crate) trait Kill {` is also the shape of a signature: a name, a
+    // parameter list that closes, and a brace. Read that way it declares
+    // `pub`, and the file declaring the trait falls below every file that
+    // implements it.
+    let src = "pub(crate) trait Kill {\n    fn kill(&mut self);\n}\n";
+    assert_eq!(names(src), vec!["Kill", "kill"]);
+
+    let src = "pub(super) enum Tick {\n    Fired,\n}\n";
+    assert_eq!(names(src), vec!["Tick"]);
+
+    let src = "pub(crate) mod cell {\n    use std::cell::RefCell;\n}\n";
+    assert_eq!(names(src), vec!["cell"]);
+}
+
+#[test]
+fn a_signature_named_like_a_qualifier_is_still_a_signature() {
+    // `open` is a Kotlin qualifier and a C function. With no keyword on the
+    // line there is nothing to defer to, so the signature rule keeps it.
+    assert_eq!(names("open(int fd) {\n}\n"), vec!["open"]);
+
+    // With a keyword on the line, the qualifier only wins when it comes
+    // first. Here `static` is the keyword rule's own reading and the name is
+    // behind it, so the signature still names the function.
+    assert_eq!(names("static void open(int fd) {\n}\n"), vec!["open"]);
+    assert_eq!(names("static int final(void) {\n}\n"), vec!["final"]);
 }
 
 #[test]

@@ -363,6 +363,15 @@ fn scan_assignment_declaration(line: &str) -> Option<(&str, &str)> {
     (named_callable || arrow).then_some(("function", name))
 }
 
+/// Byte offset of `part` within `line`, which it must be a subslice of.
+///
+/// The scanners return borrows of the line they read, so their positions are
+/// already known; recovering one by searching for the text would find the
+/// wrong occurrence whenever a word repeats on the line.
+fn offset_in(line: &str, part: &str) -> usize {
+    part.as_ptr() as usize - line.as_ptr() as usize
+}
+
 /// Recognize a declaration opening `line`, returning its kind and name.
 pub fn scan_declaration(line: &str) -> Option<(&str, &str)> {
     let keyword = scan_keyword_declaration(line);
@@ -379,6 +388,17 @@ pub fn scan_declaration(line: &str) -> Option<(&str, &str)> {
             // when the two disagree, since `class Repo(db: Db) {` is better
             // described by its keyword than as a function.
             Some((_, keyword_name)) if keyword_name == name => keyword,
+            // `pub(crate) trait Kill {` has the signature shape too, and the
+            // name it offers is the qualifier the keyword rule already
+            // consumed. A qualifier never names what its own line declares --
+            // but only when it sits in front of the keyword, since
+            // `static void open(int fd) {` declares a function that happens to
+            // share a qualifier's spelling.
+            Some((_, keyword_name))
+                if is_modifier(name) && offset_in(line, name) < offset_in(line, keyword_name) =>
+            {
+                keyword
+            }
             _ => Some((kind, name)),
         };
     }
@@ -523,14 +543,14 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
     out
 }
 
-/// Whether one line, on its own, looks like a declaration.
+/// The name a line declares, read from the line alone.
 ///
 /// A cheap pre-ranking signal taken straight from the searcher's matched line,
 /// before any file is read or masked. It can be fooled by a declaration
 /// written inside a docstring; [`declarations`] masks those away and is the
 /// authority. This only decides which files are worth reading.
-pub fn line_is_declaration(line: &str) -> bool {
-    scan_declaration(line).is_some()
+pub fn declaration_name(line: &str) -> Option<&str> {
+    scan_declaration(line).map(|(_, name)| name)
 }
 
 /// Declaration containing `line`, or `None` for top-level code.
@@ -543,24 +563,6 @@ pub fn enclosing(decls: &[Declaration], line: u64) -> Option<&Declaration> {
     let idx = decls.partition_point(|d| d.start_line <= line);
     let found = decls.get(idx.checked_sub(1)?)?;
     (line <= found.end_line).then_some(found)
-}
-
-/// Payload size in the unit `--max-tokens` is denominated in.
-///
-/// One unit per identifier or number run. Always at least 1, so a non-empty
-/// payload is never free. Deliberately an estimate: it tracks real tokenizer
-/// counts closely enough to budget against and costs a single byte scan.
-pub fn estimate_tokens(text: &str) -> usize {
-    let mut count = 0usize;
-    let mut in_run = false;
-    for &b in text.as_bytes() {
-        let is_word = b.is_ascii_alphanumeric() || b == b'_';
-        if is_word && !in_run {
-            count += 1;
-        }
-        in_run = is_word;
-    }
-    count.max(1)
 }
 
 /// Split camelCase/PascalCase/snake_case/kebab-case into lowercase parts.

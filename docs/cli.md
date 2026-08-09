@@ -34,9 +34,10 @@ or directory and defaults to the current one.
 | `--stats` | off | timings and budget use, to stderr |
 | `--threads N` | 0 | worker threads; 0 chooses automatically |
 
-Tokens are counted as identifier and number runs — one unit per run, a single
-byte scan. It is an estimate, close enough to a real tokenizer to budget
-against.
+Tokens are `o200k_base` tokens, so a budget is denominated in the same unit the
+context window it is meant for charges. The counts are byte-identical to
+tiktoken's for the same text, which the test suite checks against a reference
+implementation over the whole vocabulary and every source file in the tree.
 
 `--no-budget` turns the budget off entirely: every ranked span comes back, and
 extraction runs on every matching file rather than only on the ones that could
@@ -50,12 +51,12 @@ passing `--max-per-file N` alongside it puts a cap back. `--no-budget` and
 ## Output
 
 ```console
-$ rkgrep -w estimate_tokens src -t 200
-spans.rs:541-554 (fn estimate_tokens) [45 tok]
-pub fn estimate_tokens(text: &str) -> usize {
-    let mut count = 0usize;
-    ...
+$ rkgrep -w declaration_name src -t 200
+spans.rs:536-545 (fn declaration_name) [104 tok]
+pub fn declaration_name(line: &str) -> Option<&str> {
+    scan_declaration(line).map(|(_, name)| name)
 }
+...
 ```
 
 The header is `path:start-end`, then the declaring kind and symbol when the

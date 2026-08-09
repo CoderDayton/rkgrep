@@ -6,25 +6,6 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 
-/// Payload size in the unit `--max-tokens` is denominated in.
-///
-/// Mirrors `estimate_tokens` in `src/spans.rs`, which benchmarks cannot call
-/// because rkgrep builds only a binary target. Both sides of every comparison
-/// have to be charged by the same rule, so the two must agree; if the one in
-/// `src/spans.rs` changes, change this with it.
-pub fn estimate_tokens(text: &str) -> usize {
-    let mut count = 0usize;
-    let mut in_run = false;
-    for &b in text.as_bytes() {
-        let is_word = b.is_ascii_alphanumeric() || b == b'_';
-        if is_word && !in_run {
-            count += 1;
-        }
-        in_run = is_word;
-    }
-    count.max(1)
-}
-
 /// Relative path -> source text for every file under `root` with one of
 /// `suffixes`.
 ///

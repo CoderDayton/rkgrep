@@ -94,6 +94,15 @@ keyword rule reads `static int compute_hash(const char *s) {` as declaring
 actually opens can. When both agree, the keyword wins and keeps its kind, so
 `class Repo(db: Db) {` stays a class rather than becoming a function.
 
+The override stops at a qualifier. `pub(crate) trait Kill {` also has the
+signature shape — a name, a parameter list that closes, a brace opening a body
+— but the name it offers is `pub`, and a qualifier never names what its own
+line declares, so the keyword rule's `Kill` stands. Without that, every
+crate-visible Rust type is a declaration named `pub`, and the file declaring a
+trait ranks below every file implementing it. A qualifier-shaped name with no
+keyword on the line is still a signature, so C's `open(int fd) {` keeps its
+name.
+
 ## Nesting
 
 Depth comes from indentation: the enclosing declarations are the ones still

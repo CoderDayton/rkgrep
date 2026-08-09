@@ -30,6 +30,32 @@ Span extraction is not the cost. `--max-tokens 1` measures the same as a full
 budget, because spans are built only for files that could plausibly be
 returned.
 
+### What the token counter costs
+
+`--max-tokens` is denominated in real `o200k_base` tokens, and a tokenizer that
+builds its vocabulary at startup charges for that before answering anything:
+decoding 200k ranks and assembling an encoder takes **~55 ms**, every run,
+however small the query.
+
+None of that survives into the binary. `build.rs` lays the vocabulary out at
+compile time and the process maps it: resolving the table is **31 ns**, and the
+only startup left is compiling the split pattern, at ~2 ms on a background
+thread while the walk runs.
+
+| Tree | Query | Runtime-built vocabulary | Pre-built |
+| --- | --- | --- | --- |
+| 1 file | `alpha` | 56.3 ms | **4.4 ms** |
+| 547 files | `Kill -w` | 56.9 ms | **16.4 ms** |
+
+What remains on the 547-file query is counting itself, at ~76 MB/s over the
+spans extraction produces — the work the budget is made of, rather than a toll
+paid before it starts.
+
+The table costs 5.4 MB of the binary: 4 MiB of probe slots at a deliberate 0.5
+load factor, and 1.4 MB of token bytes. Halving the slots would halve that and
+lengthen every probe run, which is the wrong trade for the hottest lookup in
+the program.
+
 ## The phase model
 
 ```console

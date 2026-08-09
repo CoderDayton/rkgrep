@@ -40,8 +40,21 @@ rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files r
 ## Two-phase search
 
 The walk deliberately learns as little as possible. Its sink records a match
-count and one boolean — whether any matched line looks like a declaration on
-its own — and holds neither the file's text nor its matched line numbers.
+count and one boolean — whether any matched line declares the query on its own
+— and holds neither the file's text nor its matched line numbers.
+
+The boolean tests the declared *name* against the pattern, the same rule
+applied once the file is read. In `const a = store.createProject(...)` the
+match sits on a declaration's first line, but the declaration is `a` — a local
+binding that calls the symbol. Counting it would hand the signal to every file
+full of callers, and a test file of them then outranks the file that declares
+the name on match count alone. The pattern is applied unanchored, so under `-w`
+the same test also separates `pub fn from_std(stream: net::TcpStream)` from a
+query for `std`. The test stops after
+the first 16 matched lines of a file: a file that declares the query declares it
+in one of its first few matches, and scanning every match costs the walk a fifth
+of its time on a term like `Result`, which sits on a declaration line in almost
+every file and declares almost none of them.
 
 Line numbers are the single most expensive option in the searcher, and most
 matching files are never returned. They are resolved later, per candidate, over
@@ -86,8 +99,8 @@ returns, but not all of it.
 ## Ranking
 
 Files are ordered before any of them is read, from signals the walk already
-produced: whether a matched line looked like a declaration, how many matches
-there were, and how much the file's own name looks like the query.
+produced: whether a matched line declared the query, how many matches there
+were, and how much the file's own name looks like the query.
 
 Spans are then scored:
 
@@ -144,7 +157,9 @@ crowded module from taking everything.
 | --- | --- |
 | `src/main.rs` | CLI, exit codes, stats output |
 | `src/search.rs` | walk, ranking, regions, packing, timings |
-| `src/spans.rs` | masking, the four declaration shapes, nesting, token estimates |
+| `src/spans.rs` | masking, the four declaration shapes, nesting |
+| `src/tokenizer/` | `o200k_base` token counting against a compile-time table |
+| `build.rs` | lays that table out, so startup maps it instead of building it |
 | `src/render.rs` | text and JSON output |
 | `src/spans_tests.rs` | unit tests for extraction |
 | `tests/search.rs` | integration tests over the built binary |

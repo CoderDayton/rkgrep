@@ -22,9 +22,10 @@ use std::time::Instant;
 
 use clap::Parser as ClapParser;
 
-use support::corpus::{collect, estimate_tokens};
+use support::corpus::collect;
 use support::metrics::{coverage, mrr, under_budget};
 use support::stats::{mean, median, median_ci95, Rng};
+use support::tokenizer::count as count_tokens;
 use support::truth::{self, Language};
 
 const DEFAULT_BINARY: &str = "target/release/rkgrep";
@@ -209,7 +210,7 @@ fn rg_regions(
             continue;
         }
         let region: Vec<&str> = wanted.iter().map(|i| lines[i - 1]).collect();
-        costs.insert(path.clone(), estimate_tokens(&region.join("\n")));
+        costs.insert(path.clone(), count_tokens(&region.join("\n")));
     }
     costs
 }
