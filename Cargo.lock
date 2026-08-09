@@ -508,6 +508,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "memchr",
  "regex",
  "regex-automata",
  "riptoken",

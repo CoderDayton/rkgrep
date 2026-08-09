@@ -23,6 +23,8 @@ ignore = "0.4"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# Byte scans in the declaration scanners, which run on every matched line.
+memchr = "2"
 regex = "1"
 # The splitter runs with a per-thread cache, which `regex` does not expose.
 regex-automata = "0.4"

@@ -93,16 +93,101 @@ pub struct Declaration {
 /// fixed bound keeps the scan off the heap.
 const MAX_LEADING_WORDS: usize = 8;
 
+/// Where the words starting with each byte sit in a sorted table.
+///
+/// Searching a whole table compares several strings to answer what the first
+/// byte usually settles. The index is built from the table, so the sorting
+/// those tables already require is what makes it correct.
+const fn first_byte_index(words: &[&str]) -> [(u8, u8); BYTE_VALUES] {
+    let mut index = [(0u8, 0u8); BYTE_VALUES];
+    let mut at = 0usize;
+    while at < words.len() {
+        let byte = words[at].as_bytes()[0] as usize;
+        if index[byte].1 == 0 {
+            index[byte].0 = at as u8;
+        }
+        index[byte].1 += 1;
+        at += 1;
+    }
+    index
+}
+
+/// Whether `words` holds `word`, searching only the run that could.
+#[inline]
+fn table_holds(words: &[&str], index: &[(u8, u8); BYTE_VALUES], word: &str) -> bool {
+    let Some(&first) = word.as_bytes().first() else {
+        return false;
+    };
+    let (start, len) = index[first as usize];
+    let (start, len) = (start as usize, len as usize);
+    words[start..start + len].binary_search(&word).is_ok()
+}
+
+const KEYWORD_INDEX: [(u8, u8); BYTE_VALUES] = first_byte_index(KEYWORDS);
+const MODIFIER_INDEX: [(u8, u8); BYTE_VALUES] = first_byte_index(MODIFIERS);
+
 fn is_keyword(word: &str) -> bool {
-    KEYWORDS.binary_search(&word).is_ok()
+    table_holds(KEYWORDS, &KEYWORD_INDEX, word)
 }
 
 fn is_modifier(word: &str) -> bool {
-    MODIFIERS.binary_search(&word).is_ok()
+    table_holds(MODIFIERS, &MODIFIER_INDEX, word)
 }
 
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Every value a byte can take, which is the width of the tables below.
+const BYTE_VALUES: usize = 256;
+
+/// A byte set as a table, for the shape tests below.
+///
+/// Those ask "is this byte one of about a dozen" for every byte of a line, and
+/// `[u8]::contains` answers it by walking the dozen. One indexed load answers
+/// it in the same time whatever the set holds.
+const fn byte_set(extra: &[u8]) -> [bool; BYTE_VALUES] {
+    let mut table = [false; BYTE_VALUES];
+    let mut byte = 0usize;
+    while byte < BYTE_VALUES {
+        table[byte] = (byte as u8).is_ascii_alphanumeric() || byte == b'_' as usize;
+        byte += 1;
+    }
+    let mut at = 0usize;
+    while at < extra.len() {
+        table[extra[at] as usize] = true;
+        at += 1;
+    }
+    table
+}
+
+/// What may sit between the start of a line and a declared name: return types,
+/// qualifiers, namespaces, pointers.
+const SIGNATURE_PREFIX: [bool; BYTE_VALUES] = byte_set(b" \t*&:<>,[]~");
+
+/// What may sit between a parameter list and the brace: return types, `const`,
+/// `noexcept`, `throws E`.
+const SIGNATURE_TAIL: [bool; BYTE_VALUES] = byte_set(b" \t*&:<>,[]?-.");
+
+/// What may sit in front of an assigned name: `Api.prototype.load` is a name.
+const ASSIGNMENT_PREFIX: [bool; BYTE_VALUES] = byte_set(b" \t.:[]*&@$");
+
+/// Operators that make an `=` a compound assignment rather than a binding.
+const COMPOUND_OPERATOR: [bool; BYTE_VALUES] = {
+    let mut table = [false; BYTE_VALUES];
+    let operators = b"=!<>+-*/%&|^";
+    let mut at = 0usize;
+    while at < operators.len() {
+        table[operators[at] as usize] = true;
+        at += 1;
+    }
+    table
+};
+
+/// Whether every byte of `text` is in `set`.
+#[inline]
+fn all_bytes_in(text: &str, set: &[bool; BYTE_VALUES]) -> bool {
+    text.bytes().all(|byte| set[byte as usize])
 }
 
 /// Words that open a control-flow construct. Whatever follows one of these is
@@ -115,8 +200,10 @@ const CONTROL_WORDS: &[&str] = &[
     "when", "while", "with", "yield",
 ];
 
+const CONTROL_INDEX: [(u8, u8); BYTE_VALUES] = first_byte_index(CONTROL_WORDS);
+
 fn is_control(word: &str) -> bool {
-    CONTROL_WORDS.binary_search(&word).is_ok()
+    table_holds(CONTROL_WORDS, &CONTROL_INDEX, word)
 }
 
 fn skip_blanks(bytes: &[u8], mut i: usize) -> usize {
@@ -271,7 +358,7 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let bytes = line.as_bytes();
-    let open = bytes.iter().position(|&b| b == b'(')?;
+    let open = memchr::memchr(b'(', bytes)?;
 
     // The name is the identifier the parameter list hangs off.
     let mut cursor = open;
@@ -293,10 +380,7 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
     // Anything else -- a dot, an equals sign, a brace -- means this line is
     // calling the name rather than defining it.
     let prefix = &line[..cursor];
-    let prefix_shape = prefix
-        .bytes()
-        .all(|b| is_word_byte(b) || b" \t*&:<>,[]~".contains(&b));
-    if !prefix_shape || !words_are_declarative(prefix) {
+    if !all_bytes_in(prefix, &SIGNATURE_PREFIX) || !words_are_declarative(prefix) {
         return None;
     }
 
@@ -305,10 +389,7 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
     // or a call, neither of which this rule can read.
     let after = close_paren(bytes, open)?;
     let tail = line[after..].trim_end().trim_end_matches('{');
-    let tail_shape = tail
-        .bytes()
-        .all(|b| is_word_byte(b) || b" \t*&:<>,[]?-.".contains(&b));
-    if !tail_shape || !words_are_declarative(tail) {
+    if !all_bytes_in(tail, &SIGNATURE_TAIL) || !words_are_declarative(tail) {
         return None;
     }
     Some(("function", name))
@@ -322,12 +403,30 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
 /// the right, which is the reverse of every other rule here.
 fn scan_assignment_declaration(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
-    let eq = (0..bytes.len()).find(|&i| {
-        bytes[i] == b'='
-            && bytes.get(i + 1) != Some(&b'=')
+    // `memchr` over the line rather than a byte loop: an assignment's `=` is
+    // usually well into the line, and every byte before it is a comparison
+    // this skips.
+    let eq = memchr::memchr_iter(b'=', bytes).find(|&i| {
+        bytes.get(i + 1) != Some(&b'=')
             // `:=` declares in Go; every other compound operator reassigns.
-            && !(i > 0 && b"=!<>+-*/%&|^".contains(&bytes[i - 1]))
+            && !(i > 0 && COMPOUND_OPERATOR[bytes[i - 1] as usize])
     })?;
+
+    // What is being assigned decides this before the name does, and reading
+    // one word answers it: an assignment of anything but a function is most of
+    // the lines that reach here.
+    let rhs = line[eq + 1..].trim_start();
+    let rhs_word_end = word_end(rhs.as_bytes(), 0);
+    let named_callable = matches!(
+        &rhs[..rhs_word_end],
+        "function" | "func" | "fn" | "lambda" | "async" | "def"
+    );
+    // `(a, b) => ...` and `a => ...`; the arrow is what makes it a function
+    // rather than the tuple or the variable it would otherwise be.
+    let arrow = rhs.contains("=>") && (rhs.starts_with('(') || rhs_word_end > 0);
+    if !named_callable && !arrow {
+        return None;
+    }
 
     let mut cursor = eq;
     while cursor > 0 && (bytes[cursor - 1] == b' ' || bytes[cursor - 1] == b'\t') {
@@ -344,23 +443,10 @@ fn scan_assignment_declaration(line: &str) -> Option<(&str, &str)> {
 
     // `Api.prototype.load` is a name; `if (ready` is not.
     let prefix = &line[..cursor];
-    let prefix_shape = prefix
-        .bytes()
-        .all(|b| is_word_byte(b) || b" \t.:[]*&@$".contains(&b));
-    if !prefix_shape || !words_are_declarative(prefix) {
+    if !all_bytes_in(prefix, &ASSIGNMENT_PREFIX) || !words_are_declarative(prefix) {
         return None;
     }
-
-    let rhs = line[eq + 1..].trim_start();
-    let rhs_word_end = word_end(rhs.as_bytes(), 0);
-    let named_callable = matches!(
-        &rhs[..rhs_word_end],
-        "function" | "func" | "fn" | "lambda" | "async" | "def"
-    );
-    // `(a, b) => ...` and `a => ...`; the arrow is what makes it a function
-    // rather than the tuple or the variable it would otherwise be.
-    let arrow = rhs.contains("=>") && (rhs.starts_with('(') || rhs_word_end > 0);
-    (named_callable || arrow).then_some(("function", name))
+    Some(("function", name))
 }
 
 /// Byte offset of `part` within `line`, which it must be a subslice of.
