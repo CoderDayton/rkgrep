@@ -32,6 +32,16 @@ the rest of the file. Triple-quoted forms are matched before single ones,
 because mispairing them masks the code *after* a docstring instead of the
 docstring itself.
 
+`#` is the ambiguous marker: it opens a comment in shell, Python, Ruby and
+YAML, and opens a Rust attribute, a C preprocessor directive or a CSS color
+elsewhere. It is read as a comment unless what follows it is `[`, `![`, one of
+the thirteen preprocessor directives, or 3, 4, 6, or 8 hex digits. A shebang
+counts as a comment; `#![allow(..)]` does not.
+
+Inverting the mask — blanking everything *except* the comments — is what
+`--comments` searches against. Offsets are preserved the same way, so a line
+number resolved against it is the line number in the file.
+
 It is a scanner rather than a regex because pairing triple quotes correctly
 needs lookahead the `regex` crate does not offer. Quotes and comment markers are
 ASCII and a UTF-8 continuation byte is never equal to one, so scanning bytes
@@ -198,8 +208,9 @@ simply fall back to fixed windows.
 - **A nested function ends its parent early.** `def outer` containing `def
   inner` stops at `inner`, so the lines of `outer` below `inner` belong to
   neither and fall back to a window.
-- **The C preprocessor.** `#` opens a comment, so `#define MAX_RETRIES 5`
-  declares nothing and a header of them has no declarations at all.
+- **The C preprocessor.** `#define MAX_RETRIES 5` survives masking, but
+  `define` is not a declaration keyword, so a header of macros has no
+  declarations.
 
 Every one of these is a recognition gap, not a correctness bug: a missed
 declaration falls back to a fixed window, which is what a plain `rg -C` would

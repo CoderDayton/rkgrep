@@ -13,6 +13,7 @@
 //! 4. spans rank across the whole result set, declarations first
 //! 5. results pack under a token budget and come back with anchors
 
+use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +30,8 @@ use ignore::WalkBuilder;
 use serde::Serialize;
 
 use crate::spans::{
-    declaration_name, declarations, enclosing, identifier_tokens, kind_declares, Declaration,
+    comment_source, declaration_name, declarations, enclosing, identifier_tokens, kind_declares,
+    Declaration,
 };
 use crate::tokenizer::{count as count_tokens, count_capped};
 
@@ -182,6 +184,9 @@ pub struct Options {
     /// Cap on spans from any one file; 0 means no cap.
     pub max_per_file: usize,
     pub globs: Vec<String>,
+    /// Match only inside comments. The span returned is still the declaration
+    /// the comment sits in, so a hit carries the code it describes.
+    pub comments_only: bool,
     pub literal: bool,
     pub word: bool,
     pub ignore_case: bool,
@@ -196,6 +201,7 @@ impl Default for Options {
             max_tokens: Some(2000),
             max_per_file: 3,
             globs: Vec::new(),
+            comments_only: false,
             literal: false,
             word: false,
             ignore_case: false,
@@ -477,6 +483,17 @@ fn build_matcher(pattern: &str, opts: &Options) -> Result<RegexMatcher> {
         .with_context(|| format!("invalid pattern: {pattern}"))
 }
 
+/// What a pattern is matched against: the file itself, or only its comments.
+///
+/// [`comment_source`] preserves byte offsets and newlines, so a line number
+/// resolved against it is the line number in the original file.
+fn haystack(content: &str, comments_only: bool) -> Cow<'_, str> {
+    match comments_only {
+        true => Cow::Owned(comment_source(content)),
+        false => Cow::Borrowed(content),
+    }
+}
+
 /// Matched line numbers for one candidate file, resolved late.
 ///
 /// Only candidates reach this, so precise line numbers are paid for on the
@@ -526,6 +543,7 @@ fn collect_matches(
     // for the same lock, which measured as poor scaling across cores.
     let (tx, rx) = mpsc::channel::<FileMatches>();
     let root = root.to_path_buf();
+    let comments_only = opts.comments_only;
 
     builder.build_parallel().run(|| {
         let tx = tx.clone();
@@ -563,16 +581,30 @@ fn collect_matches(
             // buffer costs more than re-reading the few that match: most
             // files in a tree do not match, and paying full I/O plus UTF-8
             // validation for all of them dwarfs a second read of a handful.
+            //
+            // Comment scoping is the exception: the comments have to be cut
+            // out of the file before the pattern sees it, so the file is read
+            // here and the mask is searched in its place. The counts this
+            // phase produces then rank files by their comment matches rather
+            // than by matches the query will never be shown.
             let mut sink = ScoutSink {
                 matcher: &matcher,
                 matches: 0,
                 declaration_hint: false,
             };
-            if searcher
-                .search_path(&matcher, entry.path(), &mut sink)
-                .is_err()
-                || sink.matches == 0
-            {
+            let searched = if comments_only {
+                match std::fs::read_to_string(entry.path()) {
+                    Ok(content) => searcher.search_slice(
+                        &matcher,
+                        comment_source(&content).as_bytes(),
+                        &mut sink,
+                    ),
+                    Err(err) => Err(err),
+                }
+            } else {
+                searcher.search_path(&matcher, entry.path(), &mut sink)
+            };
+            if searched.is_err() || sink.matches == 0 {
                 return ignore::WalkState::Continue;
             }
             let (match_count, declaration_hint) = (sink.matches, sink.declaration_hint);
@@ -609,6 +641,8 @@ fn relative_path(root: &Path, path: &Path) -> String {
 /// separately because it is the one thing each worker needs its own copy of.
 struct Extraction<'a> {
     terms: &'a [String],
+    /// Whether the pattern is matched against comments alone.
+    comments_only: bool,
     /// Matched lines recorded per file; see [`MAX_MATCH_LINES_PER_FILE`].
     max_match_lines: usize,
     /// Lines a declaration may span before a window into it is returned
@@ -623,6 +657,7 @@ impl<'a> Extraction<'a> {
     fn for_query(opts: &Options, terms: &'a [String]) -> Self {
         Self {
             terms,
+            comments_only: opts.comments_only,
             // A budget caps what one file can contribute, so recording
             // thousands of match positions in it buys nothing. With no budget
             // the cap lifts: dropping the 513th match of a file is exactly
@@ -662,7 +697,8 @@ fn spans_for_file(candidate: &Candidate, matcher: &RegexMatcher, ex: &Extraction
     let total_lines = lines.len() as u64;
     let decls = declarations(&content);
     let mut searcher = SearcherBuilder::new().line_number(true).build();
-    let match_lines = matched_lines(&mut searcher, matcher, &content, ex.max_match_lines);
+    let searched = haystack(&content, ex.comments_only);
+    let match_lines = matched_lines(&mut searcher, matcher, &searched, ex.max_match_lines);
     if match_lines.is_empty() {
         return Vec::new();
     }

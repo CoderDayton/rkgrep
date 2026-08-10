@@ -9,6 +9,7 @@ parsed text.
 
 - [The pipeline](#the-pipeline)
 - [Two-phase search](#two-phase-search)
+- [Comment scoping](#comment-scoping)
 - [The candidate cut](#the-candidate-cut)
 - [Ranking](#ranking)
 - [Regions and merging](#regions-and-merging)
@@ -80,6 +81,22 @@ Each worker gets its own matcher clone. The regex engine draws a scratch cache
 from a pool that is lock-free only for the thread that created it
 ([rust-lang/regex#934](https://github.com/rust-lang/regex/issues/934)); cloning
 is cheap, since the compiled program sits behind an `Arc`.
+
+## Comment scoping
+
+`--comments` restricts matches to comments. The mask that hides comments during
+extraction is inverted — everything but the comments is blanked, byte offsets
+and newlines preserved — and the pattern is searched against that in place of
+the file, so a line number resolved against it is the file's own.
+
+It is a filter, not a different unit. A hit still expands to the declaration
+the comment sits in, so a `TODO` comes back with the code it is about.
+
+The walk pays for it: comments have to be cut out before the pattern sees the
+file, so the scout reads each file rather than searching it by path, and its
+match counts then rank files by their comment matches alone. The declaration
+hint is always false, because a file masked down to its comments declares
+nothing.
 
 ## The candidate cut
 

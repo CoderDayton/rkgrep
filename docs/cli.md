@@ -23,6 +23,7 @@ or directory and defaults to the current one.
 | `-A, --no-budget` | off | return every ranked span, no budget and no per-file cap |
 | `--max-per-file N` | 3 | cap spans from any one file; 0 for no cap |
 | `-g, --glob GLOB` | — | restrict to matching files, repeatable |
+| `--comments` | off | match only inside comments, in any language |
 | `-F, --fixed-strings` | off | treat the pattern as a literal string |
 | `-w, --word-regexp` | off | match whole words only |
 | `-i, --ignore-case` | off | case-insensitive matching |

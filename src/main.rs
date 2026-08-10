@@ -66,6 +66,10 @@ struct Cli {
     #[arg(long, value_name = "N")]
     max_per_file: Option<usize>,
 
+    /// Match only inside comments, in any language
+    #[arg(long)]
+    comments: bool,
+
     /// Restrict to matching files (repeatable, e.g. -g '*.rs')
     #[arg(short = 'g', long = "glob", value_name = "GLOB")]
     globs: Vec<String>,
@@ -138,6 +142,7 @@ fn main() -> ExitCode {
             DEFAULT_MAX_PER_FILE
         }),
         globs: cli.globs.clone(),
+        comments_only: cli.comments,
         literal: cli.fixed_strings,
         word: cli.word_regexp,
         ignore_case: cli.ignore_case,

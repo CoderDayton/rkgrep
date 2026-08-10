@@ -7,6 +7,44 @@ fn names(src: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_hash_that_opens_code_is_not_a_comment() {
+    // Rust attributes, C preprocessor directives and CSS colors all open with
+    // the byte a dozen other languages open a comment with.
+    let src = "#![allow(dead_code)]\n#[derive(Debug)]\nstruct Kept;\n";
+    assert_eq!(mask_source(src), src);
+    assert_eq!(comment_source(src).trim(), "");
+
+    let c = "#include <stdio.h>\n#define LIMIT 8\n";
+    assert_eq!(mask_source(c), c);
+
+    let css = "a { color: #fff; border: #aabbcc; }\n";
+    assert_eq!(mask_source(css), css);
+}
+
+#[test]
+fn a_hash_comment_still_masks() {
+    for src in [
+        "# spaced\n",
+        "#unspaced\n",
+        "## doubled\n",
+        "#!/bin/sh\n",
+        "#\n",
+    ] {
+        assert_eq!(mask_source(src).trim(), "", "{src:?}");
+    }
+}
+
+#[test]
+fn comment_source_keeps_comments_and_drops_everything_else() {
+    let src = "fn real() {\n    let s = \"needle\"; // needle here\n}\n/* needle */\n";
+    let comments = comment_source(src);
+    assert_eq!(comments.len(), src.len());
+    assert_eq!(comments.matches('\n').count(), src.matches('\n').count());
+    assert_eq!(comments.matches("needle").count(), 2);
+    assert!(!comments.contains("fn real"));
+}
+
+#[test]
 fn masking_preserves_length_and_newlines() {
     let src = "let u = \"http://x/y\"; // note\nfn real() {}";
     let masked = mask_source(src);
@@ -194,7 +232,7 @@ fn an_oversized_source_yields_no_declarations() {
 fn tables_are_sorted_for_binary_search() {
     // Lookup is a binary search, so an unsorted table silently stops
     // recognizing whatever sits past the first inversion.
-    for table in [KEYWORDS, MODIFIERS, CONTROL_WORDS] {
+    for table in [KEYWORDS, MODIFIERS, CONTROL_WORDS, PREPROCESSOR_DIRECTIVES] {
         assert!(table.windows(2).all(|w| w[0] < w[1]), "{table:?}");
     }
 }

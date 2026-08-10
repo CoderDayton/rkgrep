@@ -182,6 +182,34 @@ fn globs_restrict_the_search() {
 }
 
 #[test]
+fn comments_scope_matches_to_comments() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // `stale` is named in a comment inside `evict`, and declared below it.
+    fs::write(
+        dir.path().join("cache.py"),
+        "def evict(key):\n    # drop the stale entry\n    return key\n\n\ndef stale(key):\n    return key\n",
+    )
+    .expect("write");
+
+    let hits = json_hits(dir.path(), &["stale", "--comments", "-t", "1000"]);
+    assert_eq!(hits.as_array().map(Vec::len), Some(1), "hits: {hits}");
+    // Filter only: the span is still the declaration the comment sits in.
+    assert_eq!(hits[0]["symbol"], "evict");
+}
+
+#[test]
+fn comments_ignore_attributes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        dir.path().join("lib.rs"),
+        "#[derive(Debug)]\nstruct Marker;\n",
+    )
+    .expect("write");
+    let (stdout, code) = rkgrep(dir.path(), &["derive", "--comments"]);
+    assert_eq!(code, 1, "stdout: {stdout}");
+}
+
+#[test]
 fn no_matches_exits_one_and_prints_nothing() {
     let dir = tree();
     let (stdout, code) = rkgrep(dir.path(), &["no_such_symbol_anywhere"]);
