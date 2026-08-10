@@ -64,7 +64,7 @@ rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files r
 | Phase | Parallel | Work |
 | --- | --- | --- |
 | `walk` | yes | every file in the tree, searched |
-| `rank` | no | order candidates by signals the walk produced |
+| `rank` | no | every ordering decision: candidates, then the spans they yield |
 | `extract` | yes, within a batch | read candidates, extract declarations, resolve line numbers |
 
 The two numbers in parentheses are the ones to read first. 15,526 files matched
@@ -84,20 +84,33 @@ they are roughly a third of a query. By Amdahl that caps overall scaling around
 5–6× however many cores are added, against ripgrep's 7.6× on the same tree.
 
 **Ranking** is 3–4 ms on 15k matching files and is no longer worth attacking.
-It was 55 ms until `path_score` — which lowercases a file name and splits it
-into a `Vec<String>` — stopped being called from inside a sort comparator that
+`path_score` — which lowercases a file name and splits it into a `Vec<String>`
+— is computed once per candidate rather than from inside a sort comparator that
 runs O(n log n) times.
 
-**Extraction** is the remaining floor. Its candidates run in parallel, one
-thread per file, so a batch costs what its largest member costs rather than the
-sum. On a JavaScript tree the largest member is routinely a megabyte of bundled
-output, and that single file sets the floor at ~13 ms no matter how many cores
-are available.
+**Extraction** is the remaining floor. A batch is spread across one worker per
+core, each pulling the next candidate from a shared cursor, so it costs what
+its slowest worker costs rather than the sum. Never one thread per file: a
+`--no-budget` query extracts every matching file in the tree, and spawning a
+thread for each of several thousand small ones costs more than reading them
+does.
 
-Closing that means either giving up on huge single files — a size cut would
-change which spans come back — or splitting one file's extraction across
-threads, which is four sequential passes (read, mask, scan, search) over one
-buffer. Neither is obviously worth it while the walk is three times larger.
+What is left is the single largest file in a batch. On a JavaScript tree that
+is routinely a megabyte of bundled output, and one file is one worker however
+many cores are available. Closing that means either giving up on huge single
+files — a size cut would change which spans come back — or splitting one file's
+extraction across threads, which is four sequential passes (read, mask, scan,
+search) over one buffer. Neither is obviously worth it while the walk is three
+times larger.
+
+### Without a budget
+
+`--no-budget` inverts the design: every matching file is read, so extraction
+stops being a rounding error on the walk and becomes the query. On a 92k-file
+tree where `Config` matches 4,756 files, the walk is 74 ms and extraction is
+245 ms across 32 cores. There is nothing for the budget check to stop for, so
+the batch is a whole pass of 256 rather than 8, and the workers are spawned
+once for it.
 
 ## Measured dead ends
 

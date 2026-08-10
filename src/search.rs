@@ -15,6 +15,7 @@
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,9 @@ use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use serde::Serialize;
 
-use crate::spans::{declaration_name, declarations, enclosing, identifier_tokens, Declaration};
+use crate::spans::{
+    declaration_name, declarations, enclosing, identifier_tokens, kind_declares, Declaration,
+};
 use crate::tokenizer::{count as count_tokens, count_capped};
 
 /// A match on a declaration line is the strongest signal available: it is the
@@ -48,8 +51,16 @@ const W_PATH: f64 = 1.0;
 const W_DEPTH: f64 = 1.0;
 
 /// Window for matches outside any declaration: imports, top-level constants,
-/// configuration literals.
+/// configuration literals. Also what a declaration too large to return is
+/// clamped to.
 pub const ORPHAN_CONTEXT: u64 = 6;
+
+/// Roughly what one line of source costs, which is what turns a token budget
+/// into the line budget a declaration is clamped against.
+///
+/// Deliberately generous: over-estimating clamps a declaration a little early,
+/// while under-estimating hands the packer spans it can only drop.
+const TOKENS_PER_LINE: usize = 12;
 
 /// Spans are extracted only until this multiple of the budget is on hand.
 /// Ranking needs more material than it returns, but not all of it: a term
@@ -150,7 +161,8 @@ impl Serialize for Hit {
 pub struct Timings {
     /// Parallel: walk the tree, search every file, collect the matching ones.
     pub walk: Duration,
-    /// Serial: order candidates by the signals the walk produced.
+    /// Serial: every ordering decision — candidates by the signals the walk
+    /// produced, then the spans those candidates yielded.
     pub rank: Duration,
     /// Serial: read candidates, extract declarations, resolve line numbers.
     pub extract: Duration,
@@ -390,6 +402,7 @@ fn regions_for(
     lines: &[u64],
     total_lines: u64,
     matcher: &RegexMatcher,
+    max_declaration_lines: u64,
 ) -> Vec<Region> {
     let mut sorted = lines.to_vec();
     sorted.sort_unstable();
@@ -400,13 +413,29 @@ fn regions_for(
     let mut regions: Vec<Region> = Vec::new();
     for line in sorted {
         let (start, end, symbol, kind, depth) = match enclosing(decls, line) {
-            Some(d) => (
+            Some(d) if d.end_line - d.start_line < max_declaration_lines => (
                 d.start_line,
                 d.end_line.min(total_lines),
                 Some(d.name.clone()),
                 Some(d.kind.clone()),
                 d.depth,
             ),
+            // Larger than the budget can admit, so returning it whole means
+            // the packer drops it and the query answers nothing at all. A
+            // window into a 400-line container is worth more than the
+            // container is. The declaration's own first line keeps its name,
+            // so "where is X declared" still ranks as a declaration instead
+            // of losing to every file that merely mentions it.
+            Some(d) => {
+                let names = line == d.start_line;
+                (
+                    line.saturating_sub(ORPHAN_CONTEXT).max(d.start_line),
+                    (line + ORPHAN_CONTEXT).min(d.end_line).min(total_lines),
+                    names.then(|| d.name.clone()),
+                    names.then(|| d.kind.clone()),
+                    if names { d.depth } else { 0 },
+                )
+            }
             None => (
                 line.saturating_sub(ORPHAN_CONTEXT).max(1),
                 (line + ORPHAN_CONTEXT).min(total_lines),
@@ -421,7 +450,9 @@ fn regions_for(
         {
             Some(existing) => existing.matched.push(line),
             None => {
-                let is_declaration = start == line && declares_query(matcher, symbol.as_deref());
+                let is_declaration = start == line
+                    && kind.as_deref().is_some_and(kind_declares)
+                    && declares_query(matcher, symbol.as_deref());
                 regions.push(Region {
                     start,
                     end,
@@ -572,17 +603,54 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// What turning a candidate into spans needs, beyond the candidate itself.
+///
+/// Fixed for the whole query and shared by every worker. The matcher travels
+/// separately because it is the one thing each worker needs its own copy of.
+struct Extraction<'a> {
+    terms: &'a [String],
+    /// Matched lines recorded per file; see [`MAX_MATCH_LINES_PER_FILE`].
+    max_match_lines: usize,
+    /// Lines a declaration may span before a window into it is returned
+    /// instead; see [`TOKENS_PER_LINE`].
+    max_declaration_lines: u64,
+    /// Threads a batch is spread across.
+    workers: usize,
+}
+
+impl<'a> Extraction<'a> {
+    /// The settings one query's extraction runs under.
+    fn for_query(opts: &Options, terms: &'a [String]) -> Self {
+        Self {
+            terms,
+            // A budget caps what one file can contribute, so recording
+            // thousands of match positions in it buys nothing. With no budget
+            // the cap lifts: dropping the 513th match of a file is exactly
+            // what `--no-budget` promises not to do.
+            max_match_lines: match opts.max_tokens {
+                Some(_) => MAX_MATCH_LINES_PER_FILE,
+                None => usize::MAX,
+            },
+            // A declaration past this many lines cannot fit the budget, so
+            // what the query gets is a window into it. Without a budget
+            // nothing is too large.
+            max_declaration_lines: opts
+                .max_tokens
+                .map_or(u64::MAX, |max| (max / TOKENS_PER_LINE).max(1) as u64),
+            workers: match opts.threads {
+                0 => std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+                threads => threads,
+            },
+        }
+    }
+}
+
 /// Every span one candidate file contributes.
 ///
 /// Pulled out of the candidate loop so a batch of candidates can be turned
 /// into spans on several threads at once: each call touches only its own file
 /// and returns an owned result.
-fn spans_for_file(
-    candidate: &Candidate,
-    matcher: &RegexMatcher,
-    terms: &[String],
-    max_match_lines: usize,
-) -> Vec<Hit> {
+fn spans_for_file(candidate: &Candidate, matcher: &RegexMatcher, ex: &Extraction) -> Vec<Hit> {
     let file = &candidate.file;
     let Ok(content) = std::fs::read_to_string(&file.absolute) else {
         return Vec::new();
@@ -594,13 +662,19 @@ fn spans_for_file(
     let total_lines = lines.len() as u64;
     let decls = declarations(&content);
     let mut searcher = SearcherBuilder::new().line_number(true).build();
-    let match_lines = matched_lines(&mut searcher, matcher, &content, max_match_lines);
+    let match_lines = matched_lines(&mut searcher, matcher, &content, ex.max_match_lines);
     if match_lines.is_empty() {
         return Vec::new();
     }
 
     let mut hits = Vec::new();
-    for region in regions_for(&decls, &match_lines, total_lines, matcher) {
+    for region in regions_for(
+        &decls,
+        &match_lines,
+        total_lines,
+        matcher,
+        ex.max_declaration_lines,
+    ) {
         let from = (region.start.saturating_sub(1)) as usize;
         let to = (region.end as usize).min(lines.len());
         if from >= to {
@@ -608,7 +682,7 @@ fn spans_for_file(
         }
         let text = lines[from..to].join("\n");
         let score = W_MATCHES * ((region.matched.len() + 1) as f64).ln()
-            + W_TERMS * term_overlap(&text, terms)
+            + W_TERMS * term_overlap(&text, ex.terms)
             + W_PATH * candidate.path_score;
         hits.push(Hit {
             path: file.path.clone(),
@@ -631,35 +705,175 @@ fn spans_for_file(
 ///
 /// The files in a batch are independent, and one of them is routinely a
 /// megabyte of bundled JavaScript while the rest are ordinary source, so the
-/// batch costs what its largest member costs rather than the sum.
-fn spans_for_batch(
-    batch: &[Candidate],
-    matcher: &RegexMatcher,
-    terms: &[String],
-    max_match_lines: usize,
-) -> Vec<Vec<Hit>> {
-    if batch.len() < 2 {
-        return batch
-            .iter()
-            .map(|c| spans_for_file(c, matcher, terms, max_match_lines))
-            .collect();
+/// batch costs what its slowest worker costs rather than the sum.
+///
+/// One worker per core, pulling the next candidate from a shared cursor —
+/// never one thread per file. A no-budget query extracts every matching file
+/// in the tree, and spawning a thread for each of several thousand small ones
+/// costs more than reading them does.
+fn spans_for_batch(batch: &[Candidate], matcher: &RegexMatcher, ex: &Extraction) -> Vec<Vec<Hit>> {
+    let mut out: Vec<Vec<Hit>> = (0..batch.len()).map(|_| Vec::new()).collect();
+    let workers = ex.workers.min(batch.len());
+    if workers < 2 {
+        for (slot, candidate) in out.iter_mut().zip(batch) {
+            *slot = spans_for_file(candidate, matcher, ex);
+        }
+        return out;
     }
-    // A batch is at most `MIN_CANDIDATE_FILES`, so one thread per file needs
-    // no pool and no work queue.
+
+    let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let workers: Vec<_> = batch
-            .iter()
-            .map(|candidate| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
                 // A matcher per worker: see the note in `collect_matches`.
                 let matcher = matcher.clone();
-                scope.spawn(move || spans_for_file(candidate, &matcher, terms, max_match_lines))
+                let next = &next;
+                scope.spawn(move || extract_share(batch, next, &matcher, ex))
             })
             .collect();
-        workers
-            .into_iter()
-            .map(|w| w.join().unwrap_or_default())
-            .collect()
-    })
+        // Written back by index, so the result does not depend on which worker
+        // finished first.
+        for handle in handles {
+            for (at, hits) in handle.join().unwrap_or_default() {
+                out[at] = hits;
+            }
+        }
+    });
+    out
+}
+
+/// One worker's share of a batch: whatever the cursor hands it, each result
+/// carrying the index it belongs at.
+fn extract_share(
+    batch: &[Candidate],
+    next: &AtomicUsize,
+    matcher: &RegexMatcher,
+    ex: &Extraction,
+) -> Vec<(usize, Vec<Hit>)> {
+    let mut mine: Vec<(usize, Vec<Hit>)> = Vec::new();
+    loop {
+        let at = next.fetch_add(1, Ordering::Relaxed);
+        let Some(candidate) = batch.get(at) else {
+            return mine;
+        };
+        mine.push((at, spans_for_file(candidate, matcher, ex)));
+    }
+}
+
+/// Spans gathered so far, and what they have cost against the budget.
+#[derive(Default)]
+struct Gathered {
+    hits: Vec<Hit>,
+    tokens: usize,
+    read_files: usize,
+}
+
+impl Gathered {
+    /// Take one batch's spans, charging each against `budget`.
+    ///
+    /// The gate that stops extraction reads `tokens` and nothing else does,
+    /// so a span is counted only up to what is still missing: the sum crosses
+    /// the budget on exactly the span it would have crossed on. A count that
+    /// came in under its cap is the real one, so the packer inherits it; the
+    /// rest go uncounted until it asks.
+    fn absorb(&mut self, batch: Vec<Vec<Hit>>, budget: Option<usize>) {
+        for file_hits in batch {
+            if !file_hits.is_empty() {
+                self.read_files += 1;
+            }
+            for hit in file_hits {
+                let missing = budget.map_or(0, |b| b.saturating_sub(self.tokens));
+                if missing > 0 {
+                    let counted = count_capped(&hit.text, missing);
+                    self.tokens += counted;
+                    if counted < missing {
+                        let _ = hit.tokens.set(counted);
+                    }
+                }
+                self.hits.push(hit);
+            }
+        }
+    }
+}
+
+/// Read candidates best-first until the budget has enough material to rank.
+///
+/// Ordering and reading interleave: a common term matches tens of thousands of
+/// files to return a handful, so candidates are lifted out in passes of
+/// `CANDIDATE_CHUNK` and another pass runs only if the budget is still
+/// unfilled. Ordering is a ranking cost rather than an extraction one, so it
+/// is timed on its own and taken back off the phase total.
+fn gather_spans(
+    ranked: &mut [Candidate],
+    matcher: &RegexMatcher,
+    terms: &[String],
+    opts: &Options,
+    timings: &mut Timings,
+) -> Vec<Hit> {
+    let started = Instant::now();
+    let mut ordering_total = Duration::ZERO;
+    let ex = Extraction::for_query(opts, terms);
+
+    // Without a budget every matching file is a candidate: there is no size
+    // for extraction to stop at, and stopping early would silently drop
+    // matches that were asked for.
+    let budget = opts
+        .max_tokens
+        .map(|max| max.saturating_mul(CANDIDATE_SLACK));
+    let exhausted = |examined: usize, gathered: usize| {
+        examined >= MIN_CANDIDATE_FILES && budget.is_some_and(|b| gathered >= b)
+    };
+    // With a budget, a batch is the smallest run the budget check cannot cut
+    // short. Without one there is nothing to stop for, so a whole pass goes at
+    // once and the workers are spawned for it once rather than once per eight
+    // files.
+    let batch_width = if budget.is_some() {
+        MIN_CANDIDATE_FILES
+    } else {
+        CANDIDATE_CHUNK
+    };
+
+    let mut found = Gathered::default();
+    let mut examined = 0usize;
+    let mut start = 0usize;
+    'passes: while start < ranked.len() {
+        if exhausted(examined, found.tokens) {
+            break;
+        }
+        let ordering = Instant::now();
+        let end = (start + CANDIDATE_CHUNK).min(ranked.len());
+        if end < ranked.len() {
+            ranked[start..].select_nth_unstable_by(CANDIDATE_CHUNK - 1, better_candidate);
+        }
+        ranked[start..end].sort_by(better_candidate);
+        ordering_total += ordering.elapsed();
+
+        let mut at = start;
+        while at < end {
+            // The budget is consulted per batch rather than per file, so a
+            // query reads at most `MIN_CANDIDATE_FILES - 1` files past the
+            // point one at a time would have stopped. `CANDIDATE_SLACK`
+            // already gathers four times the budget before stopping, so those
+            // files widen the field ranking chooses from and cost a thread
+            // each rather than a pass each.
+            let batch_len = batch_width.min(end - at);
+            found.absorb(
+                spans_for_batch(&ranked[at..at + batch_len], matcher, &ex),
+                budget,
+            );
+            examined += batch_len;
+            at += batch_len;
+            if exhausted(examined, found.tokens) {
+                break 'passes;
+            }
+        }
+        start = end;
+    }
+
+    timings.read_files = found.read_files;
+    timings.rank += ordering_total;
+    timings.extract = started.elapsed().saturating_sub(ordering_total);
+    found.hits
 }
 
 /// Ranked spans matching `pattern`, packed under `opts.max_tokens`, and a
@@ -689,78 +903,9 @@ pub fn search(pattern: &str, root: &Path, opts: &Options) -> Result<(Vec<Hit>, T
         .collect();
     timings.rank = started.elapsed();
 
-    let started = Instant::now();
-    // Without a budget every matching file is a candidate: there is no size
-    // for extraction to stop at, and stopping early would silently drop
-    // matches that were asked for.
-    let budget = opts
-        .max_tokens
-        .map(|max| max.saturating_mul(CANDIDATE_SLACK));
-    let exhausted = |examined: usize, gathered: usize| {
-        examined >= MIN_CANDIDATE_FILES && budget.is_some_and(|b| gathered >= b)
-    };
-    let max_match_lines = match opts.max_tokens {
-        Some(_) => MAX_MATCH_LINES_PER_FILE,
-        None => usize::MAX,
-    };
-    let mut gathered = 0usize;
-    let mut hits: Vec<Hit> = Vec::new();
+    let mut hits = gather_spans(&mut ranked, &matcher, &terms, opts, &mut timings);
 
-    let mut examined = 0usize;
-    let mut start = 0usize;
-    'passes: while start < ranked.len() {
-        if exhausted(examined, gathered) {
-            break;
-        }
-        let end = (start + CANDIDATE_CHUNK).min(ranked.len());
-        if end < ranked.len() {
-            ranked[start..].select_nth_unstable_by(CANDIDATE_CHUNK - 1, better_candidate);
-        }
-        ranked[start..end].sort_by(better_candidate);
-
-        let mut at = start;
-        while at < end {
-            // The first batch is the run the budget check cannot cut short --
-            // `MIN_CANDIDATE_FILES` are always examined -- so extracting them
-            // together returns exactly what examining them one at a time
-            // would. After that the budget is consulted per file, as before.
-            let batch_len = if examined == 0 {
-                MIN_CANDIDATE_FILES.min(end - at)
-            } else {
-                1
-            };
-            let batch = &ranked[at..at + batch_len];
-            for file_hits in spans_for_batch(batch, &matcher, &terms, max_match_lines) {
-                if !file_hits.is_empty() {
-                    timings.read_files += 1;
-                }
-                for hit in file_hits {
-                    // The gate below is `gathered >= budget` and nothing else
-                    // reads the total, so a span is counted only up to what is
-                    // still missing: the sum crosses the budget on exactly the
-                    // span it would have crossed on. A count that came in
-                    // under its cap is the real one, so the packer inherits
-                    // it; the rest go uncounted until it asks.
-                    let missing = budget.map_or(0, |b| b.saturating_sub(gathered));
-                    if missing > 0 {
-                        let counted = count_capped(&hit.text, missing);
-                        gathered += counted;
-                        if counted < missing {
-                            let _ = hit.tokens.set(counted);
-                        }
-                    }
-                    hits.push(hit);
-                }
-            }
-            examined += batch_len;
-            at += batch_len;
-            if exhausted(examined, gathered) {
-                break 'passes;
-            }
-        }
-        start = end;
-    }
-
+    let ordering = Instant::now();
     penalize_shadowed_declarations(&mut hits);
 
     // Declarations first, unconditionally. A span whose match lands on the
@@ -778,7 +923,7 @@ pub fn search(pattern: &str, root: &Path, opts: &Options) -> Result<(Vec<Hit>, T
             .then(a.path.cmp(&b.path))
             .then(a.start_line.cmp(&b.start_line))
     });
-    timings.extract = started.elapsed();
+    timings.rank += ordering.elapsed();
 
     Ok((pack(hits, opts), timings))
 }
@@ -800,20 +945,23 @@ fn penalize_shadowed_declarations(hits: &mut [Hit]) {
             *entry = (*entry).min(hit.depth);
         }
     }
-    let shallowest: std::collections::HashMap<String, usize> = shallowest
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
+
+    // Collected before anything is written, because the map is keyed by
+    // symbols it borrows out of the hits it is about to charge. One `f64` per
+    // hit ends that borrow; copying every symbol out of the map to end it
+    // instead costs an allocation per declaration.
+    let penalties: Vec<f64> = hits
+        .iter()
+        .map(|hit| match (hit.is_declaration, &hit.symbol) {
+            (true, Some(symbol)) => shallowest
+                .get(symbol.as_str())
+                .map_or(0.0, |best| W_DEPTH * hit.depth.saturating_sub(*best) as f64),
+            _ => 0.0,
+        })
         .collect();
 
-    for hit in hits.iter_mut() {
-        if !hit.is_declaration {
-            continue;
-        }
-        let Some(symbol) = &hit.symbol else { continue };
-        let Some(&best) = shallowest.get(symbol) else {
-            continue;
-        };
-        hit.score -= W_DEPTH * hit.depth.saturating_sub(best) as f64;
+    for (hit, penalty) in hits.iter_mut().zip(penalties) {
+        hit.score -= penalty;
     }
 }
 

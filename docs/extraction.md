@@ -61,6 +61,12 @@ because ending it at the `(` would reject the whole line. Only a qualifier gets
 this — skipping parentheses after any word would read `if (ready(x)) {` as a
 declaration.
 
+A keyword may carry generic parameters the same way: `impl<T> Repo<T>`,
+`impl<'a, F: Fn() -> u32> Runner<F>`. The bracketed group is skipped, and a `>`
+following `-` or `=` is stepped over rather than counted, so an arrow inside a
+bound does not close the list early. Only a keyword gets this, so `if a<b &&
+c>(d) {` stays a comparison.
+
 **Receiver** exists because Go puts the receiver between the keyword and the
 name, so the keyword rule — which wants the name next — sees nothing at all.
 
@@ -94,14 +100,15 @@ keyword rule reads `static int compute_hash(const char *s) {` as declaring
 actually opens can. When both agree, the keyword wins and keeps its kind, so
 `class Repo(db: Db) {` stays a class rather than becoming a function.
 
-The override stops at a qualifier. `pub(crate) trait Kill {` also has the
-signature shape — a name, a parameter list that closes, a brace opening a body
-— but the name it offers is `pub`, and a qualifier never names what its own
-line declares, so the keyword rule's `Kill` stands. Without that, every
-crate-visible Rust type is a declaration named `pub`, and the file declaring a
-trait ranks below every file implementing it. A qualifier-shaped name with no
-keyword on the line is still a signature, so C's `open(int fd) {` keeps its
-name.
+The override applies only to a name found *behind* the keyword's own. The name
+a line declares is the last one it offers, and a signature in front of that is
+part of what the keyword rule already consumed: the qualifier in `pub(crate)
+trait Kill {`, the bound in `impl<F: Fn() -> u32> Runner<F> {`. Without that,
+every crate-visible Rust type is a declaration named `pub` and every generic
+impl declares the trait in its bound. `static void open(int fd) {` and `static
+int compute_hash(…) {` both name theirs behind the keyword, so the signature
+still wins, and a qualifier-shaped name with no keyword on the line is still a
+signature — C's `open(int fd) {` keeps its name.
 
 ## Nesting
 
@@ -114,6 +121,13 @@ class Repo:             # depth 0
     def save(self):     # depth 1
         def inner():    # depth 2
 ```
+
+An `impl` block is in the table — nesting depth is read from it, and the methods
+inside one are reached through it — but it does not *declare* the name it
+carries. `impl Repo` re-opens a type its `struct` declares, and `impl Store for
+Repo` names a trait declared somewhere else again; an impl block names its type
+more often than the declaration does, so it wins on match count whenever it is
+allowed to compete. See [Architecture](architecture.md#ranking).
 
 Depth is what separates the `save` a module declares from the `save` some
 unrelated class happens to have. Both declare the name; only nesting tells
@@ -128,12 +142,33 @@ nothing is reordered. C functions all start at column zero.
 
 ## Spans
 
-A declaration's span runs from its own line to the line before the next
-declaration, so a one-line declaration reports a one-line span and a class
-header stops where its first method begins.
+A declaration's span ends at whichever comes first: the end of the body it
+opens, or the line before the first declaration nested inside it.
 
-A match outside every declaration — an import, a top-level constant, a
-configuration literal — gets a fixed ±6-line window instead.
+The body is the run of lines indented deeper than the declaration itself, plus
+a closing line — `}`, `};`, `]),`, or `end` — sitting back at its own indent. A
+blank line neither ends a body nor extends one, so a paragraph break inside a
+function does not close it and a span does not trail off into the gap below its
+last statement.
+
+Stopping at the first nested declaration is what keeps a class to its header.
+The body of a class is its methods, and each of those is already a span in its
+own right, so returning the class whole returns them a second time and spends a
+whole budget on one file.
+
+The two rules answer different failure modes. Without the body rule, the last
+declaration in a file runs to the end of it, and a module whose tail is a data
+literal produces one span larger than any budget — which the packer drops,
+leaving a query that matched reporting nothing at all. Without the nesting
+rule, every container is returned in full.
+
+A declaration whose body is still larger than the budget could admit is
+reported as a ±6-line window into it rather than dropped. A match on its own
+first line keeps the name, so "where is this declared" still ranks as a
+declaration.
+
+A match outside every declaration — an import, a top-level constant, a class
+constant written below the last method — gets the same ±6-line window.
 
 Files above 8 MiB get no declaration table at all. They still match; their hits
 simply fall back to fixed windows.
@@ -156,6 +191,15 @@ simply fall back to fixed windows.
 - **Kinds are the declaring keyword, not a type system.** The signature and
   assignment shapes report `function` for everything they find, including C++
   methods and JavaScript getters.
+- **A lifetime reads as a string literal.** Masking cannot tell Rust's `'a`
+  from a single-quoted string without knowing the language, and unmasking it
+  would leave every Python and JavaScript string open. `impl<'a> Repo<'a>` is
+  masked past its name and reports no declaration; `impl<T> Repo<T>` is found.
+- **A nested function ends its parent early.** `def outer` containing `def
+  inner` stops at `inner`, so the lines of `outer` below `inner` belong to
+  neither and fall back to a window.
+- **The C preprocessor.** `#` opens a comment, so `#define MAX_RETRIES 5`
+  declares nothing and a header of them has no declarations at all.
 
 Every one of these is a recognition gap, not a correctness bug: a missed
 declaration falls back to a fixed window, which is what a plain `rg -C` would

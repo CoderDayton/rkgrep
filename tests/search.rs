@@ -340,6 +340,122 @@ fn no_budget_lifts_the_per_file_cap_but_an_explicit_one_still_wins() {
     );
 }
 
+/// `impl Repo` re-opens a name; `struct Repo` declares it, and `impl Store for
+/// Repo` names a trait declared somewhere else again. All three match the
+/// name, so letting an impl block claim the declaration bonus puts a block of
+/// methods above the definition those methods belong to.
+#[test]
+fn an_impl_block_is_not_where_the_type_is_declared() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // The impl block names the type more often than the declaration does,
+    // which is the ordinary shape of a Rust file and is what puts it ahead on
+    // match count alone.
+    fs::write(
+        dir.path().join("repo.rs"),
+        "pub struct Repo<T> {\n    item: T,\n}\n\n\
+         impl<T> Repo<T> {\n\
+         \x20   pub fn duplicate(&self) -> Repo<T> {\n\
+         \x20       Repo { item: self.item }\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+
+    let hits = json_hits(dir.path(), &["Repo", "-w"]);
+    assert_eq!(hits[0]["kind"], "struct", "{hits}");
+    assert_eq!(hits[0]["start_line"], 1, "{hits}");
+}
+
+/// A declaration whose body runs to 400 lines, with the match inside it.
+fn container(marker: &str) -> String {
+    let mut source = format!("class Registry:\n    seed({marker})\n");
+    for i in 0..400 {
+        source.push_str(&format!("    values.append({i})\n"));
+    }
+    source
+}
+
+/// A declaration too large for the budget is a container, not an answer. The
+/// match comes back as a window into it: no budget could admit the whole
+/// block, so returning it means the packer drops it and the query reports
+/// nothing at all.
+#[test]
+fn an_oversized_declaration_comes_back_as_a_window() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(dir.path().join("big.py"), container("MARKER_NAME")).expect("write");
+
+    let hits = json_hits(dir.path(), &["MARKER_NAME"]);
+    assert!(
+        !hits.as_array().expect("array").is_empty(),
+        "the match must be reported: {hits}"
+    );
+    let start = hits[0]["start_line"].as_u64().expect("start");
+    let end = hits[0]["end_line"].as_u64().expect("end");
+    assert!(
+        end - start <= 12,
+        "a window, not the whole block: {start}-{end}"
+    );
+}
+
+/// Clamping an oversized declaration must not cost it the declaration bonus:
+/// a match on its own first line is still the answer to "where is this
+/// declared", and the span simply starts there instead of covering the body.
+#[test]
+fn an_oversized_declaration_still_answers_where_it_is_declared() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(dir.path().join("big.py"), container("seed")).expect("write");
+
+    let hits = json_hits(dir.path(), &["Registry", "-w"]);
+    assert_eq!(hits[0]["symbol"], "Registry", "{hits}");
+    assert_eq!(hits[0]["is_declaration"], true, "{hits}");
+}
+
+/// Candidates are extracted several at a time, on a thread each, and the walk
+/// that produced them finishes in no particular order. Neither may reach the
+/// result: the same query over the same tree is the same answer every time.
+#[test]
+fn repeated_runs_return_identical_results() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for i in 0..40 {
+        fs::write(
+            dir.path().join(format!("mod_{i}.py")),
+            format!(
+                "def handler_{i}(req):\n    return validate_token(req)\n\n\ndef helper_{i}(x):\n    return x\n"
+            ),
+        )
+        .expect("write");
+    }
+    let first = json_hits(dir.path(), &["validate_token", "-t", "300"]);
+    assert!(!first.as_array().expect("array").is_empty(), "{first}");
+    for _ in 0..4 {
+        assert_eq!(
+            json_hits(dir.path(), &["validate_token", "-t", "300"]),
+            first
+        );
+    }
+}
+
+/// A declaration whose file ends in data used to run to end of file, so the
+/// only span answering the query did not fit any budget, the packer dropped
+/// it, and the run reported nothing — indistinguishable from the pattern
+/// being absent from the tree.
+#[test]
+fn a_declaration_above_a_data_literal_still_fits_a_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut source = String::from("def find_user(id):\n    return id\n\nDATA = [\n");
+    for i in 0..1500 {
+        source.push_str(&format!("    \"row {i}\",\n"));
+    }
+    source.push_str("]\n");
+    fs::write(dir.path().join("rows.py"), &source).expect("write");
+
+    let hits = json_hits(dir.path(), &["find_user", "-w"]);
+    assert_eq!(
+        hits[0]["symbol"], "find_user",
+        "the declaration must survive the budget: {hits}"
+    );
+}
+
 /// The per-file match-line cap is a budget optimization, so it lifts with the
 /// budget. A file with more matches than the cap must still report all of them.
 #[test]

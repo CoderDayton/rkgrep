@@ -75,7 +75,10 @@ pub struct Declaration {
     pub kind: String,
     /// 1-based, inclusive.
     pub start_line: u64,
-    /// 1-based, inclusive. Runs to the line before the next declaration.
+    /// 1-based, inclusive. Ends at the body the declaration opens, or before
+    /// the first declaration nested inside it, whichever comes first — so a
+    /// declaration is charged neither for what the file holds after it nor
+    /// for the declarations its own body is made of.
     pub end_line: u64,
     /// How deeply the declaration nests, from indentation: 0 for a top-level
     /// declaration, 1 for a method of a top-level class, and so on.
@@ -247,6 +250,33 @@ fn close_paren(bytes: &[u8], open: usize) -> Option<usize> {
     None
 }
 
+/// Index just past the `>` closing the parameter list that opens at `open`,
+/// or `None` if it does not close on this line.
+///
+/// `->` and `=>` both end in `>` and neither closes anything, so a `>` that
+/// follows one is stepped over rather than counted: without that, the bound in
+/// `impl<F: Fn() -> u32> Runner<F>` ends the list at the arrow.
+fn close_angle(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, &byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'<' => depth += 1,
+            b'>' if matches!(
+                offset.checked_sub(1).and_then(|prev| bytes.get(prev)),
+                Some(b'-' | b'=')
+            ) => {}
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Whether every word in `text` is safe to see in front of a declared name.
 fn words_are_declarative(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -296,6 +326,15 @@ fn scan_keyword_declaration(line: &str) -> Option<(&str, &str)> {
         // the declaration is missed entirely.
         if bytes.get(i) == Some(&b'(') && is_modifier(word) {
             match close_paren(bytes, i) {
+                Some(end) => i = end,
+                None => break,
+            }
+        }
+        // A keyword may carry generic parameters the same way: Rust writes
+        // `impl<T> Repo<T>`, and the run would otherwise end on the `<`. Only
+        // a keyword, so `if a<b && c>(d) {` is still a comparison.
+        else if bytes.get(i) == Some(&b'<') && is_keyword(word) {
+            match close_angle(bytes, i) {
                 Some(end) => i = end,
                 None => break,
             }
@@ -474,15 +513,13 @@ pub fn scan_declaration(line: &str) -> Option<(&str, &str)> {
             // when the two disagree, since `class Repo(db: Db) {` is better
             // described by its keyword than as a function.
             Some((_, keyword_name)) if keyword_name == name => keyword,
-            // `pub(crate) trait Kill {` has the signature shape too, and the
-            // name it offers is the qualifier the keyword rule already
-            // consumed. A qualifier never names what its own line declares --
-            // but only when it sits in front of the keyword, since
-            // `static void open(int fd) {` declares a function that happens to
-            // share a qualifier's spelling.
-            Some((_, keyword_name))
-                if is_modifier(name) && offset_in(line, name) < offset_in(line, keyword_name) =>
-            {
+            // The name a line declares is the last one it offers. A
+            // signature found in front of the keyword's own name is part of
+            // what the keyword rule already consumed -- the qualifier in
+            // `pub(crate) trait Kill {`, the bound in `impl<F: Fn() -> u32>
+            // Runner<F> {` -- while `static void open(int fd) {` and
+            // `static int compute_hash(...) {` both name theirs behind it.
+            Some((_, keyword_name)) if offset_in(line, name) < offset_in(line, keyword_name) => {
                 keyword
             }
             _ => Some((kind, name)),
@@ -579,6 +616,53 @@ pub fn mask_source(content: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| content.to_string())
 }
 
+/// Where a line's text begins, or `None` if the line holds nothing.
+fn indent_of(line: &str) -> Option<usize> {
+    let text = line.trim_start_matches([' ', '\t']);
+    (!text.is_empty()).then(|| line.len() - text.len())
+}
+
+/// Whether a line holds nothing but what closes a body.
+///
+/// The closer sits back at the declaration's own indent, so the body run ends
+/// above it and it would otherwise be left out of the span. A function
+/// reported without its closing brace reads as truncated source.
+fn closes_a_body(line: &str) -> bool {
+    let text = line.trim_matches([' ', '\t']);
+    if text.is_empty() {
+        return false;
+    }
+    // Ruby and Lua close with a word rather than a delimiter.
+    text == "end" || text.bytes().all(|b| BODY_CLOSERS.contains(&b))
+}
+
+/// Delimiters a body can close with, and the punctuation that may trail them:
+/// `}`, `};`, `]),`.
+const BODY_CLOSERS: &[u8] = b")]};,";
+
+/// The last line of the body `start_line` opens.
+///
+/// The body is the run of lines indented deeper than the declaration itself.
+/// Blank lines neither end it nor extend it — a paragraph break inside a
+/// function does not close the function, and a span should not trail off into
+/// the gap below its last statement.
+fn body_end(lines: &[&str], start_line: u64, indent: usize) -> u64 {
+    let mut end = start_line;
+    for (offset, line) in lines.iter().enumerate().skip(start_line as usize) {
+        match indent_of(line) {
+            None => {}
+            Some(deeper) if deeper > indent => end = offset as u64 + 1,
+            Some(_) => {
+                if closes_a_body(line) {
+                    end = offset as u64 + 1;
+                }
+                break;
+            }
+        }
+    }
+    end
+}
+
 /// Every declaration in `content`, in file order.
 ///
 /// Returns an empty table for sources above [`MAX_SOURCE_BYTES`]; such a file
@@ -588,12 +672,11 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
         return Vec::new();
     }
     let masked = mask_source(content);
-    let mut total_lines = 0u64;
+    let lines: Vec<&str> = masked.lines().collect();
     let mut hits: Vec<(u64, String, String, usize)> = Vec::new();
-    for (index, line) in masked.lines().enumerate() {
-        total_lines = (index + 1) as u64;
+    for (index, line) in lines.iter().enumerate() {
         if let Some((kind, name)) = scan_declaration(line) {
-            let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+            let indent = indent_of(line).unwrap_or(0);
             hits.push((
                 (index + 1) as u64,
                 kind.to_string(),
@@ -608,12 +691,20 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
     let mut open: Vec<usize> = Vec::new();
     let mut out = Vec::with_capacity(hits.len());
     for (i, (start_line, kind, name, indent)) in hits.iter().enumerate() {
+        // A declaration ends at its body, and one whose body is made of other
+        // declarations ends before the first of them: the methods of a class
+        // are spans in their own right, so returning the class whole returns
+        // them a second time and spends a whole budget on one file. Hits are
+        // in file order, so the next one is that first nested declaration
+        // whenever the body reaches it, and a sibling the body already stops
+        // above.
+        let body = body_end(&lines, *start_line, *indent);
         let end_line = match hits.get(i + 1) {
-            // Ends on the line before the next declaration, so a one-line
-            // declaration reports a one-line span.
-            Some((next, _, _, _)) => next.saturating_sub(1).max(*start_line),
-            None => total_lines.max(*start_line),
-        };
+            Some((next, _, _, _)) => body.min(next.saturating_sub(1)),
+            None => body,
+        }
+        .max(*start_line);
+
         while open.last().is_some_and(|top| *top >= *indent) {
             open.pop();
         }
@@ -629,6 +720,18 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
     out
 }
 
+/// Whether a declaration of this kind declares the name it carries.
+///
+/// `impl Repo` re-opens a type its `struct` declares, and `impl Store for
+/// Repo` names a trait declared somewhere else again. Both belong in the
+/// table — nesting depth is read from it, and the methods inside one are
+/// found through it — but neither is an answer to "where is this declared",
+/// and an impl block names its type more often than the declaration does, so
+/// it wins on match count whenever it is allowed to compete.
+pub fn kind_declares(kind: &str) -> bool {
+    kind != "impl"
+}
+
 /// The name a line declares, read from the line alone.
 ///
 /// A cheap pre-ranking signal taken straight from the searcher's matched line,
@@ -636,15 +739,22 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
 /// written inside a docstring; [`declarations`] masks those away and is the
 /// authority. This only decides which files are worth reading.
 pub fn declaration_name(line: &str) -> Option<&str> {
-    scan_declaration(line).map(|(_, name)| name)
+    scan_declaration(line)
+        .filter(|(kind, _)| kind_declares(kind))
+        .map(|(_, name)| name)
 }
 
-/// Declaration containing `line`, or `None` for top-level code.
+/// Declaration containing `line`, or `None` for code inside none of them.
 ///
 /// Declarations are ordered and non-overlapping, so the only candidate is the
 /// last one starting at or before the line. A linear scan here would be
 /// O(matches × declarations), which is the difference between a fast query and
 /// a slow one in a file with hundreds of symbols.
+///
+/// Spans end at their bodies rather than running to the next declaration, so
+/// they no longer tile the file: a line between two of them — a class-level
+/// constant below the last method — belongs to neither, and is reported as a
+/// window instead of attributed to a body that does not hold it.
 pub fn enclosing(decls: &[Declaration], line: u64) -> Option<&Declaration> {
     let idx = decls.partition_point(|d| d.start_line <= line);
     let found = decls.get(idx.checked_sub(1)?)?;

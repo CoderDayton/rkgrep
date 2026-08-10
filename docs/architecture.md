@@ -96,6 +96,12 @@ Extraction stops once `CANDIDATE_SLACK` (4×) the budget is on hand, and always
 examines at least `MIN_CANDIDATE_FILES` (8). Ranking needs more material than it
 returns, but not all of it.
 
+Within a pass, candidates are read a batch at a time. With a budget the batch is
+the 8 files the budget check cannot cut short, so a query reads at most 7 files
+past where checking one at a time would have stopped — files that widen the
+field ranking chooses from rather than work thrown away. With `--no-budget`
+there is nothing to stop for and the batch is the whole pass.
+
 ## Ranking
 
 Files are ordered before any of them is read, from signals the walk already
@@ -120,12 +126,19 @@ path and start line. Letting a file that mentions X twenty times outrank the
 one that defines it is how a ranker loses to a one-line grep.
 
 A span counts as a declaration when the match lands on a declaration's first
-line *and the pattern matches the declared name*. Both halves are needed: in
+line, *the pattern matches the declared name*, and the declaration is of a kind
+that declares rather than re-opens. The first two are needed together: in
 `const a = store.createProject(...)` the match is on a declaration's first
 line, but the declaration is `a`, so the span is a caller and not an answer to
 "where is `createProject`". Applying the same matcher to the name keeps this
 right for regex patterns, and under `-w` stops `createProject` from claiming
 `createProjectManager`.
+
+The third excludes `impl`. `impl Repo` re-opens a type its `struct` declares,
+and `impl Store for Repo` names a trait declared elsewhere again — and an impl
+block names its type more often than the declaration does, so on match count it
+wins every time it is allowed to compete, putting a block of methods above the
+definition those methods belong to.
 
 The depth term is charged only against a declaration that a shallower
 declaration of the same name is competing with. Penalizing depth across the
@@ -137,6 +150,10 @@ board costs coverage without improving the answer — measured, see
 Each matched line expands to the declaration enclosing it, found by binary
 search over the declaration table rather than a linear scan — the difference
 between a fast query and a slow one in a file with hundreds of symbols.
+Declarations end at their bodies rather than running to the next one, so they
+do not tile the file: a line inside none of them gets a ±6-line window, as does
+a match inside a declaration too large for the budget to admit. See
+[Extraction](extraction.md#spans).
 
 Matches landing in the same declaration collapse into one region, so a function
 matched eight times is one span rather than eight. Overlapping regions then
