@@ -22,19 +22,9 @@ const W_PATH: f64 = 1.0;
 
 /// Charged per level of nesting, and only against a declaration that a
 /// shallower declaration of the same name is competing with.
-///
-/// Asking where `save` is defined means the `save` a module declares, not the
-/// `save` method some unrelated class happens to have. Penalising depth
-/// unconditionally would also demote methods that nothing competes with, and
-/// since a top-level span is the larger of the two, that spends budget without
-/// answering the question any better.
 const W_DEPTH: f64 = 1.0;
 
 /// Ranking terms recovered from a search pattern.
-///
-/// The pattern may be a regex, so metacharacters are dropped and what is left
-/// is tokenized the way an identifier would be: a search for `validateToken`
-/// should still rank a `validate_token` span.
 pub fn query_terms(pattern: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -101,10 +91,6 @@ pub(super) fn span_score(text: &str, terms: &[String], matches: usize, path_scor
 }
 
 /// A matching file with its ranking signals resolved.
-///
-/// The path scores are computed once here rather than inside the ordering
-/// comparator: each lowercases and splits the file name into a `Vec<String>`,
-/// and a comparator runs O(n log n) times.
 pub(super) struct Candidate {
     pub(super) file: FileMatches,
     /// How much the file's name looks like each pattern, indexed by pattern.
@@ -161,11 +147,6 @@ pub(super) fn better_hit(a: &Hit, b: &Hit) -> std::cmp::Ordering {
 }
 
 /// Demote a declaration that a shallower declaration of the same name shadows.
-///
-/// Two files declaring `save` -- one at module level, one as a method of an
-/// unrelated class -- are both declarations of the name, and nesting is the
-/// only thing that separates the one being asked about from the one that
-/// merely shares its spelling.
 pub(super) fn penalize_shadowed_declarations(hits: &mut [Hit]) {
     let mut shallowest: HashMap<&str, usize> = HashMap::new();
     for hit in hits.iter() {
@@ -178,10 +159,6 @@ pub(super) fn penalize_shadowed_declarations(hits: &mut [Hit]) {
         }
     }
 
-    // Collected before anything is written, because the map is keyed by
-    // symbols it borrows out of the hits it is about to charge. One `f64` per
-    // hit ends that borrow; copying every symbol out of the map to end it
-    // instead costs an allocation per declaration.
     let penalties: Vec<f64> = hits
         .iter()
         .map(|hit| match (hit.is_declaration, &hit.symbol) {

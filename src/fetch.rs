@@ -36,9 +36,6 @@ fn parse(text: &str) -> Result<Anchor> {
 }
 
 /// The anchors to fetch: the ones given, or the ones on stdin for `-`.
-///
-/// Reading anchors off stdin is what makes `rkgrep -l X | rkgrep --fetch -`
-/// work, so the survey and the read compose without a temporary file.
 fn anchors(given: &[String]) -> Result<Vec<Anchor>> {
     let mut text: Vec<String> = Vec::new();
     for one in given {
@@ -47,8 +44,6 @@ fn anchors(given: &[String]) -> Result<Vec<Anchor>> {
             std::io::stdin()
                 .read_to_string(&mut buffer)
                 .context("reading anchors from stdin")?;
-            // Anchors arrive as the first word of a header line, so the rest
-            // of a `-l` line is ignored rather than rejected.
             text.extend(
                 buffer
                     .lines()
@@ -63,10 +58,6 @@ fn anchors(given: &[String]) -> Result<Vec<Anchor>> {
 }
 
 /// The lines each anchor names, in the order given, under `max_tokens`.
-///
-/// The lines are returned as asked for rather than re-snapped to declaration
-/// bounds: the anchors came from rkgrep and are already declaration-shaped, so
-/// widening them here would return something other than what was surveyed.
 pub fn fetch(given: &[String], root: &Path, max_tokens: Option<usize>) -> Result<Vec<Hit>> {
     let mut hits = Vec::new();
     let mut used = 0usize;
@@ -93,8 +84,6 @@ pub fn fetch(given: &[String], root: &Path, max_tokens: Option<usize>) -> Result
             format!("{}:{}-{}", anchor.path, anchor.start, to),
             lines[from..to].join("\n"),
         );
-        // A span too large for what is left is skipped and the rest still
-        // arrive, which is the rule the packer follows.
         if max_tokens.is_some_and(|max| used + hit.tokens() > max) {
             continue;
         }

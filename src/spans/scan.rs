@@ -107,12 +107,6 @@ fn words_are_declarative(text: &str) -> bool {
 
 /// A declaration keyword opening the line, after zero or more qualifiers.
 ///
-/// A hand-written scan rather than a regex. This runs on every matched line in
-/// the tree during the walk, and a 23-way alternation of qualifiers in front of
-/// a 17-way alternation of keywords costs several times what reading the two or
-/// three words that decide the question does: replacing it took 12-23% off a
-/// single-threaded search of a 45k-file tree.
-///
 /// Qualifiers are consumed greedily and then given back one at a time, because
 /// `const` and `static` are both qualifier and keyword: `const static x`
 /// declares `x`, not `static`.
@@ -149,7 +143,6 @@ fn scan_keyword_declaration(line: &str) -> Option<(&str, &str)> {
                 None => break,
             }
         }
-        // Words must be separated by blanks; anything else ends the run.
         let after = i;
         i = skip_blanks(bytes, i);
         if i == after {
@@ -171,9 +164,6 @@ fn scan_keyword_declaration(line: &str) -> Option<(&str, &str)> {
 }
 
 /// A Go method: `func (r *Repo) Save(ctx context.Context) error`.
-///
-/// The receiver sits between the keyword and the name, so the keyword rule --
-/// which wants the name next -- sees nothing at all.
 fn scan_receiver_declaration(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
     let mut i = skip_blanks(bytes, 0);
@@ -197,11 +187,6 @@ fn scan_receiver_declaration(line: &str) -> Option<(&str, &str)> {
 /// A function written as a signature with no declaring keyword at all:
 /// `int main(void) {`, `public int compute(int x) {`, `void Repo::save() {`,
 /// `async loadUser(id) {`, `deploy() {`.
-///
-/// This is most of C, C++, Java, C#, shell, and every method body in a
-/// JavaScript class. The shape is a name, a parameter list that closes, and a
-/// brace opening the body on the same line -- the brace is what separates a
-/// definition from the call `compute(x);` one line below it.
 fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
     if !line.trim_end().ends_with('{') {
         return None;
@@ -209,7 +194,6 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
     let open = memchr::memchr(b'(', bytes)?;
 
-    // The name is the identifier the parameter list hangs off.
     let mut cursor = open;
     while cursor > 0 && (bytes[cursor - 1] == b' ' || bytes[cursor - 1] == b'\t') {
         cursor -= 1;
@@ -219,23 +203,15 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
         cursor -= 1;
     }
     let name = &line[cursor..name_end];
-    // A keyword here means the parameter list belongs to something else --
-    // `func (r *Repo) Save(...)` hangs its first list off `func`.
     if !opens_identifier(name) || is_control(name) || is_keyword(name) {
         return None;
     }
 
-    // In front of the name: return types, qualifiers, namespaces, pointers.
-    // Anything else -- a dot, an equals sign, a brace -- means this line is
-    // calling the name rather than defining it.
     let prefix = &line[..cursor];
     if !all_bytes_in(prefix, &SIGNATURE_PREFIX) || !words_are_declarative(prefix) {
         return None;
     }
 
-    // Between the parameter list and the brace: return types, `const`,
-    // `noexcept`, `throws E`. A parenthesis here is a member initializer list
-    // or a call, neither of which this rule can read.
     let after = close_paren(bytes, open)?;
     let tail = line[after..].trim_end().trim_end_matches('{');
     if !all_bytes_in(tail, &SIGNATURE_TAIL) || !words_are_declarative(tail) {
@@ -247,31 +223,20 @@ fn scan_signature_declaration(line: &str) -> Option<(&str, &str)> {
 /// A callable bound to a name: `handler = lambda req: ...`,
 /// `let load = function (id) {`, `Api.prototype.load = function () {`,
 /// `handler := func(w http.ResponseWriter) {`.
-///
-/// The name is on the left of the assignment and the thing being named is on
-/// the right, which is the reverse of every other rule here.
 fn scan_assignment_declaration(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
-    // `memchr` over the line rather than a byte loop: an assignment's `=` is
-    // usually well into the line, and every byte before it is a comparison
-    // this skips.
     let eq = memchr::memchr_iter(b'=', bytes).find(|&i| {
         bytes.get(i + 1) != Some(&b'=')
             // `:=` declares in Go; every other compound operator reassigns.
             && !(i > 0 && COMPOUND_OPERATOR[bytes[i - 1] as usize])
     })?;
 
-    // What is being assigned decides this before the name does, and reading
-    // one word answers it: an assignment of anything but a function is most of
-    // the lines that reach here.
     let rhs = line[eq + 1..].trim_start();
     let rhs_word_end = word_end(rhs.as_bytes(), 0);
     let named_callable = matches!(
         &rhs[..rhs_word_end],
         "function" | "func" | "fn" | "lambda" | "async" | "def"
     );
-    // `(a, b) => ...` and `a => ...`; the arrow is what makes it a function
-    // rather than the tuple or the variable it would otherwise be.
     let arrow = rhs.contains("=>") && (rhs.starts_with('(') || rhs_word_end > 0);
     if !named_callable && !arrow {
         return None;
@@ -290,7 +255,6 @@ fn scan_assignment_declaration(line: &str) -> Option<(&str, &str)> {
         return None;
     }
 
-    // `Api.prototype.load` is a name; `if (ready` is not.
     let prefix = &line[..cursor];
     if !all_bytes_in(prefix, &ASSIGNMENT_PREFIX) || !words_are_declarative(prefix) {
         return None;
@@ -299,10 +263,6 @@ fn scan_assignment_declaration(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Byte offset of `part` within `line`, which it must be a subslice of.
-///
-/// The scanners return borrows of the line they read, so their positions are
-/// already known; recovering one by searching for the text would find the
-/// wrong occurrence whenever a word repeats on the line.
 fn offset_in(line: &str, part: &str) -> usize {
     part.as_ptr() as usize - line.as_ptr() as usize
 }
@@ -317,18 +277,7 @@ pub fn scan_declaration(line: &str) -> Option<(&str, &str)> {
     }
     if let Some((kind, name)) = scan_signature_declaration(line) {
         return match keyword {
-            // The keyword rule reads `static int compute_hash(...)` as
-            // declaring `int`: it cannot tell a return type from a name. The
-            // signature the line actually opens can, so it wins -- but only
-            // when the two disagree, since `class Repo(db: Db) {` is better
-            // described by its keyword than as a function.
             Some((_, keyword_name)) if keyword_name == name => keyword,
-            // The name a line declares is the last one it offers. A
-            // signature found in front of the keyword's own name is part of
-            // what the keyword rule already consumed -- the qualifier in
-            // `pub(crate) trait Kill {`, the bound in `impl<F: Fn() -> u32>
-            // Runner<F> {` -- while `static void open(int fd) {` and
-            // `static int compute_hash(...) {` both name theirs behind it.
             Some((_, keyword_name)) if offset_in(line, name) < offset_in(line, keyword_name) => {
                 keyword
             }
@@ -339,23 +288,11 @@ pub fn scan_declaration(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Whether a declaration of this kind declares the name it carries.
-///
-/// `impl Repo` re-opens a type its `struct` declares, and `impl Store for
-/// Repo` names a trait declared somewhere else again. Both belong in the
-/// table — nesting depth is read from it, and the methods inside one are
-/// found through it — but neither is an answer to "where is this declared",
-/// and an impl block names its type more often than the declaration does, so
-/// it wins on match count whenever it is allowed to compete.
 pub fn kind_declares(kind: &str) -> bool {
     kind != "impl"
 }
 
 /// The name a line declares, read from the line alone.
-///
-/// A cheap pre-ranking signal taken straight from the searcher's matched line,
-/// before any file is read or masked. It can be fooled by a declaration
-/// written inside a docstring; [`super::declarations`] masks those away and is
-/// the authority. This only decides which files are worth reading.
 pub fn declaration_name(line: &str) -> Option<&str> {
     scan_declaration(line)
         .filter(|(kind, _)| kind_declares(kind))

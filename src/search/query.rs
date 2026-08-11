@@ -42,13 +42,6 @@ fn build_matcher(pattern: &str, opts: &Options) -> Result<RegexMatcher> {
 }
 
 /// The matcher the walk searches with: any one of the patterns.
-///
-/// A single pattern compiles exactly as it always has, so a one-pattern query
-/// is unchanged. Several are joined into one alternation, which keeps the walk
-/// to a single pass over the tree. `-F` is applied by escaping each pattern
-/// rather than by `fixed_strings`, which would take the `|` literally too;
-/// `-w` wraps the whole alternation, which is what asking for whole words
-/// across several patterns means.
 fn build_scout(patterns: &[String], opts: &Options) -> Result<RegexMatcher> {
     if let [only] = patterns {
         return build_matcher(only, opts);

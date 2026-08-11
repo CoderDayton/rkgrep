@@ -136,10 +136,6 @@ struct Cli {
     min_references: usize,
 
     /// Only these declaring kinds, e.g. --kind fn,class (implies -d)
-    ///
-    /// The kind is the declaring keyword, not a type system: a function
-    /// recognized from its signature alone reports `function` whatever the
-    /// language calls it.
     #[arg(
         long,
         value_name = "KIND",
@@ -210,10 +206,6 @@ struct Cli {
 
 impl Cli {
     /// The patterns to search for, and the path to search.
-    ///
-    /// With `-e` there is no positional pattern, so the first positional is
-    /// the path. Resolving it here keeps `<PATTERN> [PATH]` in the help text
-    /// while letting `rkgrep -e Claims src/` mean what it looks like.
     fn patterns_and_path(&self) -> Result<(Vec<String>, PathBuf), String> {
         if self.regexp.is_empty() {
             let Some(pattern) = self.pattern.clone() else {
@@ -233,10 +225,6 @@ impl Cli {
     }
 
     /// The root `--fetch` resolves anchors against.
-    ///
-    /// Anchors are relative to the root they were surveyed under, so the same
-    /// path follows them back: `rkgrep -l TODO src | rkgrep --fetch - src`.
-    /// With no pattern to occupy it, the first positional is that path.
     fn fetch_root(&self) -> PathBuf {
         self.path
             .clone()
@@ -245,10 +233,6 @@ impl Cli {
     }
 
     /// The token budget a run is packed under, or `None` for every span.
-    ///
-    /// `--vimgrep` enumerates matches rather than filling a context window, so
-    /// a budget would drop most of them and a caller counting lines would
-    /// never know. An explicit `-t` still means what it says.
     fn budget(&self) -> Option<usize> {
         match self.no_budget {
             true => None,
@@ -288,7 +272,6 @@ fn write_out(rendered: &str) {
 }
 
 fn exit_code(hits: &[Hit]) -> ExitCode {
-    // 0 when something matched, 1 when nothing did, as grep does.
     match hits.is_empty() {
         true => ExitCode::from(1),
         false => ExitCode::SUCCESS,
@@ -320,9 +303,6 @@ fn run_fetch(cli: &Cli, style: Style, budget: Option<usize>) -> ExitCode {
 }
 
 /// What a run found but could not show, said once, on stderr.
-///
-/// With one pattern an empty result says this already. With several, a typo in
-/// one of them is otherwise invisible behind the answers to the others.
 fn report_gaps(patterns: &[String], found: &search::Results, kinds: &[String]) {
     if patterns.len() > 1 && !found.unmatched.is_empty() {
         eprintln!("rkgrep: no matches for {}", found.unmatched.join(", "));
@@ -335,9 +315,6 @@ fn report_gaps(patterns: &[String], found: &search::Results, kinds: &[String]) {
 fn options(cli: &Cli, paths: Option<Vec<PathBuf>>, budget: Option<usize>) -> Options {
     Options {
         max_tokens: budget,
-        // A budget is what makes a per-file cap necessary: it stops one
-        // crowded module taking the whole of it. With no budget to protect,
-        // capping only hides matches the user asked for.
         max_per_file: cli.max_per_file.unwrap_or(match budget {
             None => 0,
             Some(_) => DEFAULT_MAX_PER_FILE,
@@ -385,9 +362,6 @@ fn print_stats(found: &search::Results, budget: Option<usize>, started: Instant)
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let started = Instant::now();
-    // Parsing 200k BPE ranks takes longer than a small query's whole search.
-    // Started here, it builds while the parallel walk runs and is ready by the
-    // time the serial extract phase counts its first span.
     tokenizer::prewarm();
 
     let use_color = match cli.color {

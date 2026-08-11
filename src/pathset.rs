@@ -12,10 +12,6 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 /// Existing files under `root`, in the order given and without repeats.
-///
-/// A list can name a directory, a path that was deleted between being listed
-/// and being searched, or a file outside the search path; none of those is an
-/// error worth stopping a query for.
 fn keep_files(paths: Vec<PathBuf>, root: &Path) -> Vec<PathBuf> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut kept: Vec<PathBuf> = Vec::new();
@@ -43,9 +39,6 @@ fn split_list(text: &str, null_separated: bool) -> Vec<PathBuf> {
 }
 
 /// Paths listed in `source`, or on stdin when it is `-`.
-///
-/// Relative paths resolve against the working directory, as they do for every
-/// other tool a list gets piped through.
 pub fn from_list(source: &str, null_separated: bool, root: &Path) -> Result<Vec<PathBuf>> {
     let text = match source {
         "-" => {
@@ -78,11 +71,6 @@ fn git(args: &[&str], at: &Path) -> Result<String> {
 }
 
 /// Files that differ from `reference`, plus files git does not track yet.
-///
-/// The working tree is compared against the ref rather than one commit against
-/// another, so `--since HEAD` is uncommitted work and `--since main` is the
-/// branch, with one flag and no second concept. Untracked files are included
-/// because a file added since the ref is exactly what the question is about.
 pub fn from_git(reference: &str, root: &Path) -> Result<Vec<PathBuf>> {
     let top = git(&["rev-parse", "--show-toplevel"], root)
         .context("--since needs a git repository; use --files-from otherwise")?;

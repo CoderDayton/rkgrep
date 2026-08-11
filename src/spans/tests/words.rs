@@ -5,8 +5,6 @@ use crate::spans::words::{CONTROL_WORDS, KEYWORDS, MODIFIERS, PREPROCESSOR_DIREC
 
 #[test]
 fn tables_are_sorted_for_binary_search() {
-    // Lookup is a binary search, so an unsorted table silently stops
-    // recognizing whatever sits past the first inversion.
     for table in [KEYWORDS, MODIFIERS, CONTROL_WORDS, PREPROCESSOR_DIRECTIVES] {
         assert!(table.windows(2).all(|w| w[0] < w[1]), "{table:?}");
     }

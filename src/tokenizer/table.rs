@@ -26,8 +26,8 @@
 //! [`EMPTY`] is all ones, which no real slot can be because the highest rank in
 //! `o200k_base` is 199,997 and the rank field would have to hold 16,777,215.
 
-// Half of what follows is the writing side, which only `build.rs` calls; the
-// binary compiles the same file to read what that side wrote.
+//! Half of what follows is the writing side, which only `build.rs` calls; the
+//! binary compiles the same file to read what that side wrote.
 #![allow(dead_code)]
 
 /// Identifies the image and the layout it was written with.
@@ -65,11 +65,6 @@ pub const LOAD_DENOMINATOR: usize = 2;
 const MIX: u64 = 0x9e37_79b1_85eb_ca87;
 
 /// Hash of a token's bytes.
-///
-/// Tokens are 1..=128 bytes and overwhelmingly short, so this reads 8 bytes at
-/// a time and folds the tail through a zero-padded word rather than branching
-/// per byte. The length is mixed in at the end because that padding would
-/// otherwise make `b"a"` and `b"a\0"` hash alike.
 pub fn hash_token(key: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut chunks = key.chunks_exact(8);

@@ -72,12 +72,6 @@ impl Hit {
     }
 
     /// What this span costs against the budget.
-    ///
-    /// Extraction produces spans by the hundred and the budget admits a
-    /// handful, so counting one at construction spends most of the query on
-    /// spans that are then discarded. The packer asks in score order and stops
-    /// when the budget is full, which is the only order in which the question
-    /// is worth answering.
     pub fn tokens(&self) -> usize {
         *self.tokens.get_or_init(|| count_tokens(&self.text))
     }
@@ -157,10 +151,6 @@ pub enum Select {
 }
 
 /// Where the time went, for `--stats`.
-///
-/// The walk is the parallel phase and everything after it is serial, so this
-/// is what says whether a slow query is short of cores or short of a better
-/// ranking cut -- the two have opposite fixes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Timings {
     /// Parallel: walk the tree, search every file, collect the matching ones.
@@ -268,10 +258,6 @@ pub fn search(patterns: &[String], root: &Path, opts: &Options) -> Result<Result
 
     let started = Instant::now();
 
-    // Rank files before reading any of them, so span extraction is paid for
-    // only on files that could plausibly be returned. The signals here are
-    // whatever the walk already produced: whether a matched line looked like
-    // a declaration, how many matches there were, and the file's own name.
     let mut ranked: Vec<rank::Candidate> = files
         .drain(..)
         .map(|file| rank::Candidate::new(file, &queries.list))
@@ -283,16 +269,9 @@ pub fn search(patterns: &[String], root: &Path, opts: &Options) -> Result<Result
     let ordering = Instant::now();
     rank::penalize_shadowed_declarations(&mut hits);
 
-    // Declarations first, unconditionally. A span whose match lands on the
-    // declaration line is what "where is X" asks for; letting a file that
-    // mentions X twenty times outrank it by match count is how a ranker loses
-    // to a one-line grep.
     hits.sort_by(rank::better_hit);
     timings.rank += ordering.elapsed();
 
-    // Named before filtering: a pattern whose spans `--declarations` removed
-    // did match, and saying otherwise would send the reader after a typo that
-    // is not there.
     let unmatched = queries
         .list
         .iter()

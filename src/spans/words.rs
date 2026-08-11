@@ -81,10 +81,6 @@ pub(super) const PREPROCESSOR_DIRECTIVES: &[&str] = &[
 const BYTE_VALUES: usize = 256;
 
 /// Where the words starting with each byte sit in a sorted table.
-///
-/// Searching a whole table compares several strings to answer what the first
-/// byte usually settles. The index is built from the table, so the sorting
-/// those tables already require is what makes it correct.
 const fn first_byte_index(words: &[&str]) -> [(u8, u8); BYTE_VALUES] {
     let mut index = [(0u8, 0u8); BYTE_VALUES];
     let mut at = 0usize;
@@ -136,10 +132,6 @@ pub(super) fn is_word_byte(b: u8) -> bool {
 }
 
 /// A byte set as a table, for the shape tests the scanners run.
-///
-/// Those ask "is this byte one of about a dozen" for every byte of a line, and
-/// `[u8]::contains` answers it by walking the dozen. One indexed load answers
-/// it in the same time whatever the set holds.
 const fn byte_set(extra: &[u8]) -> [bool; BYTE_VALUES] {
     let mut table = [false; BYTE_VALUES];
     let mut byte = 0usize;
@@ -206,7 +198,6 @@ pub fn identifier_tokens(name: &str) -> Vec<String> {
         let starts_word = match prev {
             None => false,
             Some(p) => {
-                // camelCase, ACRONYMWord, and letter/digit transitions.
                 (p.is_lowercase() && c.is_uppercase())
                     || (p.is_uppercase()
                         && c.is_uppercase()

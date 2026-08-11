@@ -65,8 +65,6 @@ fn assert_matches_reference(text: &str) {
 
 #[test]
 fn the_anchored_start_state_does_not_depend_on_context() {
-    // `split` resolves the start state once and reuses it for every piece,
-    // which only holds while no alternative can read what came before it.
     use regex_automata::dfa::Automaton;
     use regex_automata::{Anchored, Input};
 
@@ -100,8 +98,6 @@ fn every_published_token_resolves_to_its_own_rank() {
 #[test]
 fn a_token_the_vocabulary_lacks_is_not_invented() {
     let vocab: &Vocabulary = &VOCAB;
-    // A byte sequence no vocabulary entry can be: longer than the longest
-    // token, and not valid UTF-8 either.
     assert_eq!(vocab.rank(&[0xffu8; 200]), None);
     assert_eq!(vocab.rank(b""), None);
 }
@@ -117,8 +113,6 @@ fn the_layout_bounds_hold_for_this_vocabulary() {
 
 #[test]
 fn known_o200k_counts() {
-    // Prose, code, punctuation, numbers, whitespace, CJK and emoji. The values
-    // are `OpenAI`'s for the same input.
     let cases = [
         ("", 0),
         ("hello world", 2),
@@ -136,10 +130,6 @@ fn known_o200k_counts() {
 
 #[test]
 fn whitespace_runs_match_the_reference() {
-    // The one alternative the linear-time engine cannot express is the one
-    // that decides where a run of blanks ends, so every shape of run is
-    // checked: interior, trailing, before a line break, after one, and at the
-    // end of the text with nothing following.
     for text in [
         "a b",
         "a  b",
@@ -161,9 +151,6 @@ fn whitespace_runs_match_the_reference() {
         "   \n",
         "def f():\n    return 1\n\n\n",
         "x = {\n    'k': 1,\n}\n   ",
-        // Vertical tab and form feed are blanks to `\s` but not to every
-        // ASCII-whitespace predicate, and a run opening with one still has to
-        // give its last character back.
         "\u{0b} y",
         "\u{0b}\u{0b}x",
         "\u{0c} y",
@@ -175,9 +162,6 @@ fn whitespace_runs_match_the_reference() {
 
 #[test]
 fn real_source_files_match_the_reference() {
-    // Whole files, because the pieces that break a tokenizer are the ones that
-    // straddle constructs: a docstring against code, a URL in a comment, an
-    // identifier against punctuation.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut checked = 0;
     for dir in ["src", "docs", "benches"] {
@@ -204,9 +188,6 @@ fn real_source_files_match_the_reference() {
 
 #[test]
 fn the_two_split_patterns_differ_only_in_the_lookahead() {
-    // The reference pattern is the published one; ours is that pattern with
-    // `\s+(?!\S)` removed. If they ever drift apart in any other way, the
-    // whitespace rule in `split` is being applied to a different language.
     assert_eq!(
         SPLIT_PATTERN_REFERENCE_MINUS_LOOKAHEAD.as_str(),
         SPLIT_PATTERN,

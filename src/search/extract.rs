@@ -26,9 +26,6 @@ use super::{Hit, Options, Timings};
 
 /// Roughly what one line of source costs, which is what turns a token budget
 /// into the line budget a declaration is clamped against.
-///
-/// Deliberately generous: over-estimating clamps a declaration a little early,
-/// while under-estimating hands the packer spans it can only drop.
 const TOKENS_PER_LINE: usize = 12;
 
 /// Spans are extracted only until this multiple of the budget is on hand.
@@ -41,17 +38,9 @@ const CANDIDATE_SLACK: usize = 4;
 const MIN_CANDIDATE_FILES: usize = 8;
 
 /// Candidates ordered per pass.
-///
-/// A common term matches tens of thousands of files and a handful of them are
-/// returned, so fully ordering the rest is work thrown away. Each pass lifts
-/// the best `CANDIDATE_CHUNK` out of what remains in linear time and orders
-/// only those; another pass runs only if the budget is still unfilled.
 const CANDIDATE_CHUNK: usize = 256;
 
 /// What a pattern is matched against: the file itself, or only its comments.
-///
-/// [`comment_source`] preserves byte offsets and newlines, so a line number
-/// resolved against it is the line number in the original file.
 fn haystack(content: &str, comments_only: bool) -> Cow<'_, str> {
     match comments_only {
         true => Cow::Owned(comment_source(content)),
@@ -60,10 +49,6 @@ fn haystack(content: &str, comments_only: bool) -> Cow<'_, str> {
 }
 
 /// Matched line numbers for one candidate file, resolved late.
-///
-/// Only candidates reach this, so precise line numbers are paid for on the
-/// handful of files that can actually be returned rather than on every file
-/// that happened to match.
 pub(super) fn matched_lines(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
@@ -80,15 +65,6 @@ pub(super) fn matched_lines(
 }
 
 /// The 1-based byte column of the first match on each of `lines`.
-///
-/// Every pattern is tried, not only the span's owner: a span belongs to one
-/// pattern but its lines can have been matched by any of them, and a column
-/// that points at the start of the line is not a position to jump to.
-///
-/// Only `--vimgrep` needs these, and they cost a matcher call per matched
-/// line, so nothing else pays for them. Resolved against what was searched, so
-/// a `--comments` match reports the column it has in the file rather than in
-/// the code the mask removed.
 fn match_columns(queries: &[Query], searched: &[&str], lines: &[u64]) -> Vec<u64> {
     lines
         .iter()
@@ -107,10 +83,6 @@ fn match_columns(queries: &[Query], searched: &[&str], lines: &[u64]) -> Vec<u64
 }
 
 /// What turning a candidate into spans needs, beyond the candidate itself.
-///
-/// Fixed for the whole run and shared by every worker. The matchers travel
-/// separately because they are the one thing each worker needs its own copy
-/// of.
 struct Extraction {
     /// Whether the patterns are matched against comments alone.
     comments_only: bool,
@@ -131,17 +103,10 @@ impl Extraction {
         Self {
             comments_only: opts.comments_only,
             columns: opts.columns,
-            // A budget caps what one file can contribute, so recording
-            // thousands of match positions in it buys nothing. With no budget
-            // the cap lifts: dropping the 513th match of a file is exactly
-            // what `--no-budget` promises not to do.
             max_match_lines: match opts.max_tokens {
                 Some(_) => MAX_MATCH_LINES_PER_FILE,
                 None => usize::MAX,
             },
-            // A declaration past this many lines cannot fit the budget, so
-            // what the query gets is a window into it. Without a budget
-            // nothing is too large.
             max_declaration_lines: opts
                 .max_tokens
                 .map_or(u64::MAX, |max| (max / TOKENS_PER_LINE).max(1) as u64),
@@ -154,10 +119,6 @@ impl Extraction {
 }
 
 /// Every span one candidate file contributes.
-///
-/// Pulled out of the candidate loop so a batch of candidates can be turned
-/// into spans on several threads at once: each call touches only its own file
-/// and returns an owned result.
 fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> Vec<Hit> {
     let file = &candidate.file;
     let Ok(content) = std::fs::read_to_string(&file.absolute) else {
@@ -172,8 +133,6 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
     let mut searcher = SearcherBuilder::new().line_number(true).build();
     let searched = haystack(&content, ex.comments_only);
 
-    // The file is read and parsed once; each pattern only re-runs the matcher
-    // over text already in memory.
     let mut matched: Vec<(u64, usize)> = Vec::new();
     for (index, query) in queries.iter().enumerate() {
         let found = matched_lines(&mut searcher, &query.matcher, &searched, ex.max_match_lines);
@@ -237,15 +196,6 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
 }
 
 /// Turn a batch of candidates into spans, in parallel, preserving their order.
-///
-/// The files in a batch are independent, and one of them is routinely a
-/// megabyte of bundled JavaScript while the rest are ordinary source, so the
-/// batch costs what its slowest worker costs rather than the sum.
-///
-/// One worker per core, pulling the next candidate from a shared cursor —
-/// never one thread per file. A no-budget query extracts every matching file
-/// in the tree, and spawning a thread for each of several thousand small ones
-/// costs more than reading them does.
 fn spans_for_batch(batch: &[Candidate], queries: &[Query], ex: &Extraction) -> Vec<Vec<Hit>> {
     let mut out: Vec<Vec<Hit>> = (0..batch.len()).map(|_| Vec::new()).collect();
     let workers = ex.workers.min(batch.len());
@@ -260,14 +210,11 @@ fn spans_for_batch(batch: &[Candidate], queries: &[Query], ex: &Extraction) -> V
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
-                // A matcher per worker: see the note in `collect_matches`.
                 let mine = queries.to_vec();
                 let next = &next;
                 scope.spawn(move || extract_share(batch, next, &mine, ex))
             })
             .collect();
-        // Written back by index, so the result does not depend on which worker
-        // finished first.
         for handle in handles {
             for (at, hits) in handle.join().unwrap_or_default() {
                 out[at] = hits;
@@ -319,12 +266,6 @@ impl Gathered {
     }
 
     /// Take one batch's spans, charging each to its own pattern's `share`.
-    ///
-    /// The gate that stops extraction reads `tokens` and nothing else does,
-    /// so a span is counted only up to what is still missing: the sum crosses
-    /// the share on exactly the span it would have crossed on. A count that
-    /// came in under its cap is the real one, so the packer inherits it; the
-    /// rest go uncounted until it asks.
     fn absorb(&mut self, batch: Vec<Vec<Hit>>, share: Option<usize>) {
         for file_hits in batch {
             if !file_hits.is_empty() {
@@ -347,12 +288,6 @@ impl Gathered {
 }
 
 /// Read candidates best-first until the budget has enough material to rank.
-///
-/// Ordering and reading interleave: a common term matches tens of thousands of
-/// files to return a handful, so candidates are lifted out in passes of
-/// `CANDIDATE_CHUNK` and another pass runs only if the budget is still
-/// unfilled. Ordering is a ranking cost rather than an extraction one, so it
-/// is timed on its own and taken back off the phase total.
 pub(super) fn gather_spans(
     ranked: &mut [Candidate],
     queries: &Queries,
@@ -363,22 +298,12 @@ pub(super) fn gather_spans(
     let mut ordering_total = Duration::ZERO;
     let ex = Extraction::for_run(opts);
 
-    // Without a budget every matching file is a candidate: there is no size
-    // for extraction to stop at, and stopping early would silently drop
-    // matches that were asked for.
-    //
-    // With several patterns the slack is divided between them, so a common
-    // pattern reaching its share does not stop a rare one being looked for.
     let share = opts
         .max_tokens
         .map(|max| (max.saturating_mul(CANDIDATE_SLACK) / queries.len()).max(1));
     let exhausted = |examined: usize, found: &Gathered| {
         examined >= MIN_CANDIDATE_FILES && share.is_some_and(|s| found.satisfied(s))
     };
-    // With a budget, a batch is the smallest run the budget check cannot cut
-    // short. Without one there is nothing to stop for, so a whole pass goes at
-    // once and the workers are spawned for it once rather than once per eight
-    // files.
     let batch_width = if share.is_some() {
         MIN_CANDIDATE_FILES
     } else {
@@ -402,12 +327,6 @@ pub(super) fn gather_spans(
 
         let mut at = start;
         while at < end {
-            // The budget is consulted per batch rather than per file, so a
-            // query reads at most `MIN_CANDIDATE_FILES - 1` files past the
-            // point one at a time would have stopped. `CANDIDATE_SLACK`
-            // already gathers four times the budget before stopping, so those
-            // files widen the field ranking chooses from and cost a thread
-            // each rather than a pass each.
             let batch_len = batch_width.min(end - at);
             found.absorb(
                 spans_for_batch(&ranked[at..at + batch_len], &queries.list, &ex),

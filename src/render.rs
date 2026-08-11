@@ -23,9 +23,6 @@ pub struct Style {
 }
 
 /// Anchored, model-readable rendering of a result set.
-///
-/// Every span leads with `path:start-end` so a reader — human or model — can
-/// go straight to the source rather than searching for the snippet again.
 pub fn render_text(hits: &[Hit], style: Style) -> String {
     let (dim, bold, reset) = match style.color {
         true => (DIM, BOLD, RESET),
@@ -51,7 +48,6 @@ pub fn render_text(hits: &[Hit], style: Style) -> String {
             push_source(&mut out, hit, style);
         }
     }
-    // Callers add their own trailing newline.
     while out.ends_with('\n') {
         out.pop();
     }
@@ -59,15 +55,6 @@ pub fn render_text(hits: &[Hit], style: Style) -> String {
 }
 
 /// A span's source, with its matched lines told apart from the rest.
-///
-/// Without `-n` this is the file's own bytes and nothing else, because rkgrep
-/// output gets pasted into editors and into context windows: a marker
-/// character in the margin would corrupt every paste to solve a display
-/// problem. Colour says which lines matched and changes no bytes at all.
-///
-/// `-n` numbers the lines and separates a matched line with `:` and any other
-/// with `-`, which is what ripgrep does and what every reader of grep output
-/// already knows.
 fn push_source(out: &mut String, hit: &Hit, style: Style) {
     let plain = !style.line_numbers && !style.color;
     if plain {
@@ -94,11 +81,6 @@ fn push_source(out: &mut String, hit: &Hit, style: Style) {
 }
 
 /// The path as the caller would have to type it to open the file.
-///
-/// Span headers are relative to the search root, which is what lets `-l`
-/// output feed `--fetch`. Quickfix knows no such root, so `--vimgrep` puts it
-/// back. A single-file search has nothing below the root, and the root is then
-/// the whole path.
 fn located(root: &str, path: &str) -> String {
     match (root, path) {
         (_, "") => root.to_string(),
@@ -108,10 +90,6 @@ fn located(root: &str, path: &str) -> String {
 }
 
 /// One line per match, as `path:line:col:text`.
-///
-/// A different unit from a span on purpose: this is what quickfix, fzf and
-/// every editor's grep integration read, and they expect one jumpable
-/// position per line.
 pub fn render_vimgrep(hits: &[Hit], root: &str) -> String {
     let mut matches: Vec<(&str, u64, u64, &str)> = Vec::new();
     for hit in hits {
@@ -126,9 +104,6 @@ pub fn render_vimgrep(hits: &[Hit], root: &str) -> String {
         }
     }
 
-    // Rank order scatters one file's matches across several blocks. Quickfix
-    // and fzf read a file as one ascending run, so the line unit is ordered
-    // like lines rather than like spans.
     matches.sort_unstable_by_key(|(path, line, ..)| (*path, *line));
 
     let mut out = String::new();

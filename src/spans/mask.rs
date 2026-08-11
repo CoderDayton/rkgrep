@@ -38,7 +38,6 @@ fn hash_opens_comment(src: &[u8], at: usize) -> bool {
                 HEX_COLOR_LENGTHS.contains(&word.len()) && word.iter().all(u8::is_ascii_hexdigit);
             !directive && !color
         }
-        // A bare `#`, or one before punctuation or whitespace.
         _ => true,
     }
 }
@@ -60,15 +59,6 @@ fn blank(out: &mut [u8], from: usize, to: usize) {
 }
 
 /// Every comment and string literal in `src`, as byte ranges in file order.
-///
-/// A scanner rather than a regex: correctly pairing triple-quoted strings
-/// needs lookahead the `regex` crate does not offer, and mispairing them masks
-/// away the code that follows a docstring instead of the docstring itself.
-///
-/// Quotes and comment markers are ASCII, and a UTF-8 continuation byte is
-/// never equal to one, so scanning bytes cannot begin a literal mid-character.
-/// Every range therefore starts and ends on a character boundary, and blanking
-/// one byte-for-byte leaves valid UTF-8.
 fn masked_regions(src: &[u8]) -> Vec<(usize, usize, Masked)> {
     let mut regions = Vec::new();
     let n = src.len();
@@ -141,10 +131,6 @@ fn masked_regions(src: &[u8]) -> Vec<(usize, usize, Masked)> {
 }
 
 /// `content` with every comment and string literal blanked out.
-///
-/// Masked regions are overwritten with spaces rather than removed, so byte
-/// offsets and newline positions survive and line numbers taken from the
-/// result are valid against the original.
 pub fn mask_source(content: &str) -> String {
     let mut out = content.as_bytes().to_vec();
     for (start, end, _) in masked_regions(content.as_bytes()) {
@@ -154,10 +140,6 @@ pub fn mask_source(content: &str) -> String {
 }
 
 /// `content` with everything but its comments blanked out.
-///
-/// The inverse of [`mask_source`], preserving offsets the same way, so a
-/// pattern searched against the result can only match inside a comment while
-/// still reporting the line numbers it has in the original file.
 pub fn comment_source(content: &str) -> String {
     let src = content.as_bytes();
     let mut out = src.to_vec();

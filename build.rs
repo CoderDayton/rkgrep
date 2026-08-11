@@ -85,10 +85,6 @@ fn split_dfa() -> Vec<u8> {
 }
 
 /// Every `<base64-token> <rank>` line, decoded.
-///
-/// Ordered by rank rather than by input order so the blob's layout is
-/// deterministic and low-rank tokens — the common ones, and the only ones a
-/// merge ever looks up repeatedly — sit together at the front of it.
 fn parse(vocab: &[u8]) -> Vec<(Vec<u8>, u32)> {
     let mut entries: Vec<(Vec<u8>, u32)> = Vec::with_capacity(200_000);
     for (n, line) in vocab.split(|&b| b == b'\n').enumerate() {
@@ -143,8 +139,6 @@ fn build(entries: &[(Vec<u8>, u32)]) -> Vec<u8> {
 
         let hash = table::hash_token(token);
         let mut at = (hash as usize) & mask;
-        // Linear probing, inserting into the first free slot. The vocabulary
-        // has no duplicate tokens, so no slot is ever overwritten.
         while slots[at] != table::EMPTY {
             assert!(
                 !token_at(&blob, slots[at]).eq(token.as_slice()),

@@ -6,14 +6,6 @@ use super::{Hit, Options};
 
 /// Interleave the ranked spans so every pattern is answered before any pattern
 /// is answered twice.
-///
-/// Asking about three symbols and being handed three answers about one of them
-/// is not what asking about three symbols means, and score order alone does
-/// exactly that when one of them is common. Each pattern keeps its own rank
-/// order; the rotation only decides whose turn it is. A pattern that runs out
-/// drops out and the others take its share.
-///
-/// A single pattern is returned untouched, so an ordinary query is unaffected.
 fn interleave(hits: Vec<Hit>, queries: usize) -> Vec<Hit> {
     if queries < 2 {
         return hits;
@@ -39,9 +31,6 @@ fn interleave(hits: Vec<Hit>, queries: usize) -> Vec<Hit> {
 }
 
 /// Which spans fit the budget, best first, skipping anything in `barred`.
-///
-/// Returns positions in `ordered`, ascending, so the result stays in rank
-/// order however it was arrived at.
 fn fill(ordered: &[Hit], opts: &Options, barred: &HashSet<usize>) -> Vec<usize> {
     let mut used = 0usize;
     let mut per_file: HashMap<&str, usize> = HashMap::new();
@@ -54,13 +43,8 @@ fn fill(ordered: &[Hit], opts: &Options, barred: &HashSet<usize>) -> Vec<usize> 
         if opts.max_per_file > 0 && count >= opts.max_per_file {
             continue;
         }
-        // Counting a span costs more than every other test here put together,
-        // so it is asked for only where a budget will consult the number.
         if let Some(max) = opts.max_tokens {
             let cost = hit.tokens();
-            // A span too large for what is left is skipped and the walk
-            // continues, so one oversized declaration cannot truncate the
-            // result set.
             if used + cost > max {
                 continue;
             }
@@ -83,12 +67,6 @@ fn references(ordered: &[Hit], chosen: &[usize]) -> usize {
 }
 
 /// Give up declarations, lowest-ranked first, until enough references fit.
-///
-/// Giving up one is often not enough on its own: the next declaration simply
-/// takes the freed budget, so they are surrendered cumulatively. If the
-/// guarantee is never met — there were no references to promote — `plain` is
-/// returned untouched, because emptying a result to chase a floor is worse
-/// than not reaching it.
 fn promote_references(ordered: &[Hit], opts: &Options, plain: Vec<usize>) -> Vec<usize> {
     let mut barred: HashSet<usize> = HashSet::new();
     let mut trial = plain.clone();
@@ -110,13 +88,6 @@ fn promote_references(ordered: &[Hit], opts: &Options, plain: Vec<usize>) -> Vec
 }
 
 /// Fill the token budget from the ranked list, capping any one file's share.
-///
-/// `--min-references` is honoured by giving up declarations, lowest-ranked
-/// first, and refilling: a large definition can take a whole budget and leave
-/// no room to see the symbol used, and the fix for that is to spend less on
-/// definitions rather than to rank references above them. The best answer is
-/// the last thing given up, and a run with no references to promote keeps
-/// every declaration it had.
 pub(super) fn pack(hits: Vec<Hit>, opts: &Options, queries: usize) -> Vec<Hit> {
     let ordered = interleave(hits, queries);
     let plain = fill(&ordered, opts, &HashSet::new());

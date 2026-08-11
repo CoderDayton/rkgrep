@@ -49,19 +49,10 @@ pub struct Declaration {
     pub end_line: u64,
     /// How deeply the declaration nests, from indentation: 0 for a top-level
     /// declaration, 1 for a method of a top-level class, and so on.
-    ///
-    /// What separates `def save` in a module from `save` as a method of some
-    /// unrelated class -- both declare the name, and only one of them is what
-    /// "where is save defined" is asking for. Indentation rather than a parser
-    /// because the whole extractor is language-agnostic; a language that does
-    /// not indent its bodies simply reports everything at depth 0.
     pub depth: usize,
 }
 
 /// Every declaration in `content`, in file order.
-///
-/// Returns an empty table for sources above [`MAX_SOURCE_BYTES`]; such a file
-/// still matches, its hits simply fall back to fixed context windows.
 pub fn declarations(content: &str) -> Vec<Declaration> {
     if content.len() > MAX_SOURCE_BYTES {
         return Vec::new();
@@ -81,8 +72,6 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
         }
     }
 
-    // Enclosing declarations are the ones still open at a shallower indent, so
-    // a stack of open indents gives the nesting depth in one pass.
     let mut open: Vec<usize> = Vec::new();
     let mut out = Vec::with_capacity(hits.len());
     for (i, (start_line, kind, name, indent)) in hits.iter().enumerate() {
@@ -119,12 +108,11 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
 ///
 /// Declarations are ordered and non-overlapping, so the only candidate is the
 /// last one starting at or before the line. A linear scan here would be
-/// O(matches × declarations), which is the difference between a fast query and
-/// a slow one in a file with hundreds of symbols.
+/// O(matches x declarations).
 ///
 /// Spans end at their bodies rather than running to the next declaration, so
-/// they no longer tile the file: a line between two of them — a class-level
-/// constant below the last method — belongs to neither, and is reported as a
+/// they do not tile the file: a line between two of them -- a class-level
+/// constant below the last method -- belongs to neither, and is reported as a
 /// window instead of attributed to a body that does not hold it.
 pub fn enclosing(decls: &[Declaration], line: u64) -> Option<&Declaration> {
     let idx = decls.partition_point(|d| d.start_line <= line);

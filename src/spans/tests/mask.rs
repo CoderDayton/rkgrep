@@ -5,8 +5,6 @@ use crate::spans::{comment_source, mask_source};
 
 #[test]
 fn a_hash_that_opens_code_is_not_a_comment() {
-    // Rust attributes, C preprocessor directives and CSS colors all open with
-    // the byte a dozen other languages open a comment with.
     let src = "#![allow(dead_code)]\n#[derive(Debug)]\nstruct Kept;\n";
     assert_eq!(mask_source(src), src);
     assert_eq!(comment_source(src).trim(), "");
@@ -53,16 +51,12 @@ fn masking_preserves_length_and_newlines() {
 
 #[test]
 fn a_url_in_a_string_is_not_a_comment() {
-    // Masking strings before comments keeps `//` inside a literal from
-    // hiding the declaration that shares its line.
     let src = "fn parse_url() { let u = \"http://parse/x\"; }";
     assert_eq!(names(src), vec!["parse_url"]);
 }
 
 #[test]
 fn triple_quoted_docstrings_mask_as_one_unit() {
-    // Mispairing a docstring's quotes masks the code that follows it, which
-    // silently erases most declarations in a Python file.
     let src = "\"\"\"Doc mentioning def fake() and class Ghost.\"\"\"\n\
                def real_one():\n    \
                \"\"\"Inner doc with class AlsoGhost.\"\"\"\n    \

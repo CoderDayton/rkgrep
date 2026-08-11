@@ -38,9 +38,6 @@ impl Region {
     }
 
     /// Every pattern with a matched line in this region.
-    ///
-    /// A region has one owner but can answer several patterns, and a pattern
-    /// that only ever shares a region with another still matched.
     pub(super) fn answered(&self) -> Vec<usize> {
         self.per_query
             .iter()
@@ -51,11 +48,6 @@ impl Region {
     }
 
     /// The pattern this region answers.
-    ///
-    /// A region it declares wins outright, since that is the question a
-    /// declaration answers. Otherwise the pattern with the most matched lines
-    /// inside it, ties going to the earliest `-e`. Exactly one owner, so two
-    /// patterns hitting the same function return it once rather than twice.
     pub(super) fn owner(&self) -> usize {
         self.declaring.unwrap_or_else(|| {
             self.per_query
@@ -68,10 +60,6 @@ impl Region {
 }
 
 /// Coalesce overlapping regions of one file.
-///
-/// A match on an import line and a match inside the function below it produce
-/// windows that overlap. Emitting both spends the budget twice on the same
-/// lines and shows the reader the same code under two anchors.
 fn merge_regions(mut regions: Vec<Region>) -> Vec<Region> {
     regions.sort_by_key(|r| (r.start, r.end));
     let mut merged: Vec<Region> = Vec::with_capacity(regions.len());
@@ -102,26 +90,11 @@ fn merge_regions(mut regions: Vec<Region>) -> Vec<Region> {
 }
 
 /// Whether this span declares the thing that was searched for.
-///
-/// The match landing on a declaration's first line is not enough. In
-/// `const a = store.createProject(...)` the match sits on the first line of a
-/// declaration, but the declaration is `a` — a local binding that merely calls
-/// the symbol. Counting that as a declaration hands the unconditional
-/// declaration bonus to every caller written on one line, and a test file full
-/// of them then outranks the file that actually declares the name.
-///
-/// So the pattern has to match the declared name itself. Applying the same
-/// matcher keeps the test honest for regex patterns and for `-w`, under which
-/// `createProject` no longer claims `createProjectManager`.
 pub(super) fn declares_query(matcher: &RegexMatcher, name: Option<&str>) -> bool {
     name.is_some_and(|name| matcher.is_match(name.as_bytes()).unwrap_or(false))
 }
 
 /// The lines one match is worth returning, and what declares them.
-///
-/// The enclosing declaration when it is small enough to return whole,
-/// otherwise a window into it, otherwise a window around a match that sits
-/// inside no declaration at all.
 fn window_for(
     decls: &[Declaration],
     line: u64,
@@ -136,12 +109,6 @@ fn window_for(
             Some(d.kind.clone()),
             d.depth,
         ),
-        // Larger than the budget can admit, so returning it whole means the
-        // packer drops it and the query answers nothing at all. A window into
-        // a 400-line container is worth more than the container is. The
-        // declaration's own first line keeps its name, so "where is X
-        // declared" still ranks as a declaration instead of losing to every
-        // file that merely mentions it.
         Some(d) => {
             let names = line == d.start_line;
             (
@@ -175,14 +142,10 @@ pub(super) fn regions_for(
     sorted.sort_unstable();
     sorted.dedup();
 
-    // Group match lines by the region that will contain them, so a function
-    // matched eight times is one span rather than eight.
     let mut regions: Vec<Region> = Vec::new();
     for (line, query) in sorted {
         let (start, end, symbol, kind, depth) =
             window_for(decls, line, total_lines, max_declaration_lines);
-        // The same line can match several patterns, so whether the region
-        // declares one is asked per pattern rather than once at creation.
         let declares = start == line
             && kind.as_deref().is_some_and(kind_declares)
             && declares_query(&queries[query].matcher, symbol.as_deref());
