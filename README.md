@@ -98,7 +98,7 @@ rkgrep PATTERN [PATH]
 | `-l, --anchors-only` | anchors without source text |
 | `-n, --line-numbers` | number the lines, marking the ones that matched |
 | `--fetch ANCHOR` | return the lines an anchor names; `-` reads stdin |
-| `--vimgrep` | one line per match as `path:line:col:text` |
+| `--vimgrep` | one line per matched line as `path:line:col:text`, every match |
 | `--json` | machine-readable output |
 | `--stats` | spans, tokens, and per-phase timings, to stderr |
 | `--threads N` | worker threads (0 chooses automatically) |
@@ -110,7 +110,7 @@ rkgrep -d validate_token             only where it is declared
 rkgrep -t 8000 -g '*.py' Config      bigger budget, Python only
 rkgrep --since main -C TODO          comments in what this branch changed
 rkgrep -l TODO | rkgrep --fetch -    survey cheaply, then read what matters
-rkgrep --vimgrep parse_url           one jumpable line per match
+rkgrep --vimgrep parse_url           one jumpable line per matching line
 rkgrep --json parse_url | jq .       structured output
 ```
 

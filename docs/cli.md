@@ -45,13 +45,13 @@ or directory and defaults to the current one.
 | `--min-references N` | 0 | keep budget for at least N non-declaration spans |
 | `--kind KIND` | — | only these declaring kinds, comma-separated; implies `-d` |
 | **Budget** | | |
-| `-t, --max-tokens N` | 2000 | budget for the whole result set |
+| `-t, --max-tokens N` | 2000 | budget for the whole result set; no default under `--vimgrep` |
 | `-A, --no-budget` | off | return every ranked span, no budget and no per-file cap |
 | `--max-per-file N` | 3 | cap spans from any one file; 0 for no cap |
 | **Output** | | |
 | `-l, --anchors-only` | off | print anchors without source text |
 | `-n, --line-numbers` | off | number every line, marking the ones that matched |
-| `--vimgrep` | off | one line per match as `path:line:col:text` |
+| `--vimgrep` | off | one line per matched line as `path:line:col:text` |
 | `--json` | off | emit JSON |
 | `--color auto\|always\|never` | auto | colorize headers and matched lines |
 | `--fetch ANCHOR` | — | return the lines an anchor names; `-` reads stdin |
@@ -199,16 +199,31 @@ spans/scan.rs:359-363 (fn declaration_name) [45 tok]
    363-}
 ```
 
-`--vimgrep` prints one line per match as `path:line:col:text`, which is what
-quickfix, fzf and every editor's grep integration read. It is a different unit
-from a span on purpose; the column costs a matcher call per matched line and is
-resolved only when this flag asks for it.
+`--vimgrep` prints one line per matched line as `path:line:col:text`, which is
+what quickfix, fzf and every editor's grep integration read. It is a different
+unit from a span on purpose; the column costs a matcher call per matched line
+and is resolved only when this flag asks for it.
 
 ```console
 $ rkgrep --vimgrep -w Region src | head -2
-search/region.rs:20:19:pub(super) struct Region {
-search/region.rs:62:35:fn merge_regions(mut regions: Vec<Region>) -> Vec<Region> {
+src/search/region.rs:20:19:pub(super) struct Region {
+src/search/region.rs:33:6:impl Region {
 ```
+
+Being a line unit rather than a span unit changes three things:
+
+- **No budget.** Enumerating matches and filling a context window are different
+  questions, and a budget would answer the second one silently. `-t` still
+  applies a budget when asked for explicitly, and `--max-per-file` still caps.
+- **Paths as typed.** A span header is relative to the search root, which is
+  what lets `-l` output feed `--fetch`. Quickfix knows no such root, so
+  `--vimgrep` prefixes the path the search was given: `rkgrep --vimgrep x src`
+  prints `src/…`, openable from the shell that ran it.
+- **Ordered by path, then line**, rather than by rank, so a file arrives as one
+  ascending run.
+
+One line per matched *line*, not per match: a line matching twice is printed
+once, at its first column. `rg --vimgrep` prints it twice.
 
 ## JSON
 

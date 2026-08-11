@@ -26,6 +26,7 @@ enum ColorChoice {
 
 /// Spans from any one file, when a token budget is in force.
 const DEFAULT_MAX_PER_FILE: usize = 3;
+const DEFAULT_MAX_TOKENS: usize = 2000;
 
 const AFTER_HELP: &str = "\
 EXAMPLES:
@@ -36,7 +37,7 @@ EXAMPLES:
   rkgrep -r validate_token           only where it is used
   rkgrep --since main -C TODO        comments in what this branch changed
   rkgrep -l TODO | rkgrep --fetch -  survey cheaply, then read what matters
-  rkgrep --vimgrep parse_url         one jumpable line per match
+  rkgrep --vimgrep parse_url         every match, one jumpable line each
   rkgrep -A validate_token           every ranked span, no budget
 
 The pattern is ripgrep's, unchanged, so ripgrep regex syntax applies. What
@@ -148,15 +149,10 @@ struct Cli {
     )]
     kind: Vec<String>,
 
-    /// Token budget for the whole result set
-    #[arg(
-        short = 't',
-        long,
-        default_value_t = 2000,
-        value_name = "N",
-        help_heading = "Budget"
-    )]
-    max_tokens: usize,
+    /// Token budget for the whole result set [default: 2000, none under
+    /// --vimgrep]
+    #[arg(short = 't', long, value_name = "N", help_heading = "Budget")]
+    max_tokens: Option<usize>,
 
     /// Return every ranked span: no token budget, and no per-file cap unless
     /// --max-per-file says otherwise
@@ -180,7 +176,8 @@ struct Cli {
     #[arg(short = 'n', long, help_heading = "Output")]
     line_numbers: bool,
 
-    /// One line per match as path:line:col:text, for editors
+    /// One line per match as path:line:col:text, for editors (every match,
+    /// unless -t sets a budget)
     #[arg(long, conflicts_with = "json", help_heading = "Output")]
     vimgrep: bool,
 
@@ -245,6 +242,20 @@ impl Cli {
             .clone()
             .or_else(|| self.pattern.clone().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// The token budget a run is packed under, or `None` for every span.
+    ///
+    /// `--vimgrep` enumerates matches rather than filling a context window, so
+    /// a budget would drop most of them and a caller counting lines would
+    /// never know. An explicit `-t` still means what it says.
+    fn budget(&self) -> Option<usize> {
+        match self.no_budget {
+            true => None,
+            false => self
+                .max_tokens
+                .or_else(|| (!self.vimgrep).then_some(DEFAULT_MAX_TOKENS)),
+        }
     }
 
     fn select(&self) -> Select {
@@ -327,9 +338,9 @@ fn options(cli: &Cli, paths: Option<Vec<PathBuf>>, budget: Option<usize>) -> Opt
         // A budget is what makes a per-file cap necessary: it stops one
         // crowded module taking the whole of it. With no budget to protect,
         // capping only hides matches the user asked for.
-        max_per_file: cli.max_per_file.unwrap_or(match cli.no_budget {
-            true => 0,
-            false => DEFAULT_MAX_PER_FILE,
+        max_per_file: cli.max_per_file.unwrap_or(match budget {
+            None => 0,
+            Some(_) => DEFAULT_MAX_PER_FILE,
         }),
         globs: cli.globs.clone(),
         paths,
@@ -347,12 +358,12 @@ fn options(cli: &Cli, paths: Option<Vec<PathBuf>>, budget: Option<usize>) -> Opt
     }
 }
 
-fn print_stats(cli: &Cli, found: &search::Results, started: Instant) {
+fn print_stats(found: &search::Results, budget: Option<usize>, started: Instant) {
     let used: usize = found.hits.iter().map(Hit::tokens).sum();
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-    let budget = match cli.no_budget {
-        true => "unlimited".to_string(),
-        false => cli.max_tokens.to_string(),
+    let budget = match budget {
+        None => "unlimited".to_string(),
+        Some(max) => max.to_string(),
     };
     eprintln!(
         "rkgrep: {} spans, {}/{} tokens, {:.1}ms total",
@@ -384,7 +395,7 @@ fn main() -> ExitCode {
         ColorChoice::Never => false,
         ColorChoice::Auto => io::stdout().is_terminal(),
     };
-    let budget = (!cli.no_budget).then_some(cli.max_tokens);
+    let budget = cli.budget();
     let mut style = Style {
         text: !cli.anchors_only,
         color: use_color,
@@ -433,14 +444,14 @@ fn main() -> ExitCode {
     style.queries = patterns.len() > 1;
     write_out(&match (cli.json, cli.vimgrep) {
         (true, _) => render_json(&found.hits),
-        (_, true) => render_vimgrep(&found.hits),
+        (_, true) => render_vimgrep(&found.hits, &path.to_string_lossy()),
         _ => render_text(&found.hits, style),
     });
 
     report_gaps(&patterns, &found, &opts.kinds);
 
     if cli.stats {
-        print_stats(&cli, &found, started);
+        print_stats(&found, budget, started);
     }
 
     exit_code(&found.hits)

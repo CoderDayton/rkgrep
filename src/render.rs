@@ -93,19 +93,47 @@ fn push_source(out: &mut String, hit: &Hit, style: Style) {
     }
 }
 
+/// The path as the caller would have to type it to open the file.
+///
+/// Span headers are relative to the search root, which is what lets `-l`
+/// output feed `--fetch`. Quickfix knows no such root, so `--vimgrep` puts it
+/// back. A single-file search has nothing below the root, and the root is then
+/// the whole path.
+fn located(root: &str, path: &str) -> String {
+    match (root, path) {
+        (_, "") => root.to_string(),
+        ("." | "", _) => path.to_string(),
+        _ => format!("{}/{path}", root.trim_end_matches('/')),
+    }
+}
+
 /// One line per match, as `path:line:col:text`.
 ///
 /// A different unit from a span on purpose: this is what quickfix, fzf and
 /// every editor's grep integration read, and they expect one jumpable
 /// position per line.
-pub fn render_vimgrep(hits: &[Hit]) -> String {
-    let mut out = String::new();
+pub fn render_vimgrep(hits: &[Hit], root: &str) -> String {
+    let mut matches: Vec<(&str, u64, u64, &str)> = Vec::new();
     for hit in hits {
         for (at, line) in hit.match_lines.iter().enumerate() {
             let column = hit.match_columns.get(at).copied().unwrap_or(1);
-            let text = hit.line(*line).unwrap_or("");
-            out.push_str(&format!("{}:{line}:{column}:{text}\n", hit.path));
+            matches.push((
+                hit.path.as_str(),
+                *line,
+                column,
+                hit.line(*line).unwrap_or(""),
+            ));
         }
+    }
+
+    // Rank order scatters one file's matches across several blocks. Quickfix
+    // and fzf read a file as one ascending run, so the line unit is ordered
+    // like lines rather than like spans.
+    matches.sort_unstable_by_key(|(path, line, ..)| (*path, *line));
+
+    let mut out = String::new();
+    for (path, line, column, text) in matches {
+        out.push_str(&format!("{}:{line}:{column}:{text}\n", located(root, path)));
     }
     while out.ends_with('\n') {
         out.pop();

@@ -398,7 +398,7 @@ fn a_malformed_anchor_is_reported_not_ignored() {
 }
 
 #[test]
-fn vimgrep_prints_one_jumpable_line_per_match() {
+fn vimgrep_prints_one_jumpable_line_per_matched_line() {
     let dir = tree();
     let out = stdout(dir.path(), &["--vimgrep", "-w", "validate_token"]);
     assert!(!out.is_empty());
@@ -414,6 +414,52 @@ fn vimgrep_prints_one_jumpable_line_per_match() {
             "{line:?}"
         );
     }
+}
+
+/// The line unit answers "every match", so a budget meant for a context
+/// window would drop most of them without saying so.
+#[test]
+fn vimgrep_enumerates_every_match_rather_than_filling_a_budget() {
+    let dir = crowded();
+    let every = stdout(dir.path(), &["--vimgrep", "-w", "validate_token"]);
+    let budgeted = stdout(
+        dir.path(),
+        &["--vimgrep", "-t", "120", "-w", "validate_token"],
+    );
+    assert_eq!(every.lines().count(), 4, "{every:?}");
+    assert!(
+        budgeted.lines().count() < every.lines().count(),
+        "an explicit -t still binds: {budgeted:?}"
+    );
+}
+
+/// Quickfix knows nothing of a search root, so a path it is handed has to
+/// open from the shell that ran the search.
+#[test]
+fn vimgrep_paths_carry_the_directory_searched() {
+    let dir = tree();
+    let out = stdout(dir.path(), &["--vimgrep", "-w", "validate_token"]);
+    assert!(!out.is_empty());
+    for line in out.lines() {
+        let path = line.split(':').next().expect("a path");
+        assert!(Path::new(path).is_file(), "{line:?}");
+    }
+}
+
+#[test]
+fn vimgrep_orders_by_path_then_line() {
+    let dir = tree();
+    let out = stdout(dir.path(), &["--vimgrep", "token"]);
+    let places: Vec<(&str, u64)> = out
+        .lines()
+        .map(|line| {
+            let parts: Vec<&str> = line.splitn(4, ':').collect();
+            (parts[0], parts[1].parse().expect("a line number"))
+        })
+        .collect();
+    let mut ascending = places.clone();
+    ascending.sort_unstable();
+    assert_eq!(places, ascending, "{out:?}");
 }
 
 #[test]

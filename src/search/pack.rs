@@ -54,12 +54,18 @@ fn fill(ordered: &[Hit], opts: &Options, barred: &HashSet<usize>) -> Vec<usize> 
         if opts.max_per_file > 0 && count >= opts.max_per_file {
             continue;
         }
-        // A span too large for what is left is skipped and the walk continues,
-        // so one oversized declaration cannot truncate the result set.
-        if opts.max_tokens.is_some_and(|max| used + hit.tokens() > max) {
-            continue;
+        // Counting a span costs more than every other test here put together,
+        // so it is asked for only where a budget will consult the number.
+        if let Some(max) = opts.max_tokens {
+            let cost = hit.tokens();
+            // A span too large for what is left is skipped and the walk
+            // continues, so one oversized declaration cannot truncate the
+            // result set.
+            if used + cost > max {
+                continue;
+            }
+            used += cost;
         }
-        used += hit.tokens();
         per_file.insert(hit.path.as_str(), count + 1);
         chosen.push(at);
         if opts.max_tokens.is_some_and(|max| used >= max) {
