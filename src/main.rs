@@ -67,7 +67,7 @@ struct Cli {
     max_per_file: Option<usize>,
 
     /// Match only inside comments, in any language
-    #[arg(long)]
+    #[arg(short = 'C', long)]
     comments: bool,
 
     /// Restrict to matching files (repeatable, e.g. -g '*.rs')

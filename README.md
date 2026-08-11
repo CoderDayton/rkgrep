@@ -52,7 +52,7 @@ Docs: [CLI](docs/cli.md) · [Architecture](docs/architecture.md) ·
   JavaScript, TypeScript, Ruby, PHP, and shell, with no parser per language.
   Comments and string literals are masked first, so a declaration written
   inside a docstring is never reported. See [Extraction](docs/extraction.md).
-- `--comments` inverts that mask and scopes a search to comments in any
+- `-C, --comments` inverts that mask and scopes a search to comments in any
   language. It filters rather than changing the unit, so a `TODO` arrives with
   the declaration it sits in.
 - Declarations carry a nesting depth taken from indentation, which separates
@@ -76,7 +76,7 @@ rkgrep PATTERN [PATH]
 | `-A, --no-budget` | every ranked span: no budget, no per-file cap |
 | `--max-per-file N` | cap spans from any one file (default 3, 0 for no cap) |
 | `-g, --glob GLOB` | restrict to matching files, repeatable |
-| `--comments` | match only inside comments, in any language |
+| `-C, --comments` | match only inside comments, in any language |
 | `-w`, `-i`, `-F` | whole words, ignore case, literal string |
 | `--hidden`, `--no-ignore` | search hidden files; ignore `.gitignore` |
 | `-l, --anchors-only` | anchors without source text |
@@ -89,7 +89,7 @@ rkgrep -w handle_request src/        whole words, under src/
 rkgrep -t 8000 -g '*.py' Config      bigger budget, Python only
 rkgrep --json parse_url | jq .       structured output
 rkgrep -l TODO                       anchors only
-rkgrep --comments TODO               comments only, with the code they sit in
+rkgrep -C TODO                       comments only, with the code they sit in
 ```
 
 Exit status follows grep: `0` matched, `1` did not, `2` error. Every span leads

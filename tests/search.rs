@@ -205,7 +205,7 @@ fn comments_ignore_attributes() {
         "#[derive(Debug)]\nstruct Marker;\n",
     )
     .expect("write");
-    let (stdout, code) = rkgrep(dir.path(), &["derive", "--comments"]);
+    let (stdout, code) = rkgrep(dir.path(), &["derive", "-C"]);
     assert_eq!(code, 1, "stdout: {stdout}");
 }
 
