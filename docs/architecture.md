@@ -178,6 +178,25 @@ merge: a match on an import line and a match in the function below it produce
 windows that overlap, and emitting both spends the budget twice on the same
 lines while showing the reader the same code under two anchors.
 
+## Several patterns
+
+`-e` is repeatable and every pattern shares one budget. The tree is still walked
+once: the patterns are joined into one alternation for the scout, which only has
+to decide which files are worth opening. Telling them apart is deferred to
+extraction, where the file has already been read and parsed, so each pattern
+costs one more matcher pass over text already in memory.
+
+Ranking is per pattern from there. Each keeps its own terms, so `claims.rs`
+scores high for `Claims` and not for `refresh`; candidate ordering uses the best
+score across patterns, since a file is worth reading if it answers any of them.
+A span belongs to exactly one pattern — the one it declares, or failing that the
+one with the most matched lines in it — so a function two patterns hit is
+returned once rather than twice.
+
+The extraction gate is per pattern for the same reason. It stops once every
+pattern has its share of `CANDIDATE_SLACK`, so a common pattern reaching its
+share does not end the search for a rare one.
+
 ## Packing
 
 Spans are taken best-first until the budget is full, skipping any that does not
@@ -185,17 +204,31 @@ fit and continuing — so a large span near the top does not strand the remainin
 budget. No file may contribute more than `--max-per-file` spans, which stops one
 crowded module from taking everything.
 
+With several patterns the order is round-robin: the top span for the first, then
+the second, then back to the first, with an exhausted pattern dropping out of
+the rotation. Score order alone would hand back three answers about whichever
+symbol is most common, which is not what asking about three symbols means.
+
+`--min-references` is met by giving up declarations, lowest-ranked first, and
+refilling. Surrendering one is rarely enough on its own — the next declaration
+takes the freed budget — so they go cumulatively, which leaves the best answer
+the last thing given up. A query with no references to promote keeps every
+declaration it had rather than emptying itself chasing the floor.
+
 ## Module layout
 
 | File | Holds |
 | --- | --- |
 | `src/main.rs` | CLI, exit codes, stats output |
 | `src/search/mod.rs` | the pipeline end to end, plus `Hit`, `Options`, timings |
+| `src/search/query.rs` | one matcher per pattern, and one for the walk |
 | `src/search/walk.rs` | the parallel pass over the tree and its scout sink |
 | `src/search/region.rs` | matched lines to declaration-scoped regions, merged |
 | `src/search/extract.rs` | reading candidates best-first, spans in parallel |
 | `src/search/rank.rs` | the weights, and every ordering decision |
-| `src/search/pack.rs` | filling the token budget from the ranked list |
+| `src/search/pack.rs` | round-robin across patterns, then the token budget |
+| `src/pathset.rs` | `--files-from` and `--since`, as one list of paths |
+| `src/fetch.rs` | returning spans by anchor, with no search |
 | `src/spans/mod.rs` | `Declaration`, the whole-file table, and `enclosing` |
 | `src/spans/words.rs` | the keyword tables and byte sets the rules use |
 | `src/spans/mask.rs` | comments and literals blanked out, offsets preserved |
@@ -206,4 +239,5 @@ crowded module from taking everything.
 | `src/render.rs` | text and JSON output |
 | `src/spans/tests/` | unit tests for extraction, one file per module |
 | `tests/search.rs` | integration tests over the built binary |
+| `tests/query_shaping.rs` | several patterns, selection, scoping, fetch, output |
 | `benches/` | quality and scaling harnesses |

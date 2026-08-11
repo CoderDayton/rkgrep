@@ -57,6 +57,16 @@ Docs: [CLI](docs/cli.md) · [Architecture](docs/architecture.md) ·
   the declaration it sits in.
 - Declarations carry a nesting depth taken from indentation, which separates
   the `save` a module declares from the `save` an unrelated class has.
+- `-e` is repeatable: several symbols, one walk, one budget. The budget is
+  spent round-robin, so asking about three symbols answers all three before it
+  answers any of them twice, and a span two patterns hit comes back once.
+- `-d` answers *where is this defined* and `-r` answers *who uses this*, which
+  is what a ranked mix is usually being read for one of.
+- `--since main` searches only what a branch changed; `--files-from -` takes
+  the file list on stdin.
+- `-l` surveys anchors cheaply and `--fetch -` reads back the ones worth
+  paying for, so a couple of hundred tokens decides how to spend a few
+  thousand.
 
 ## Usage
 
@@ -72,24 +82,36 @@ rkgrep PATTERN [PATH]
 
 | Flag | Meaning |
 | --- | --- |
+| `-e, --regexp PATTERN` | a pattern; repeat to ask about several at once |
 | `-t, --max-tokens N` | budget for the whole result set (default 2000) |
 | `-A, --no-budget` | every ranked span: no budget, no per-file cap |
 | `--max-per-file N` | cap spans from any one file (default 3, 0 for no cap) |
+| `-d`, `-r` | only declarations, only references |
+| `--kind fn,class` | only these declaring kinds (implies `-d`) |
+| `--min-references N` | keep budget for at least N non-declaration spans |
 | `-g, --glob GLOB` | restrict to matching files, repeatable |
+| `--files-from FILE` | search only these paths; `-` reads stdin |
+| `--since REF` | search only what changed since `REF` |
 | `-C, --comments` | match only inside comments, in any language |
 | `-w`, `-i`, `-F` | whole words, ignore case, literal string |
 | `--hidden`, `--no-ignore` | search hidden files; ignore `.gitignore` |
 | `-l, --anchors-only` | anchors without source text |
+| `-n, --line-numbers` | number the lines, marking the ones that matched |
+| `--fetch ANCHOR` | return the lines an anchor names; `-` reads stdin |
+| `--vimgrep` | one line per match as `path:line:col:text` |
 | `--json` | machine-readable output |
 | `--stats` | spans, tokens, and per-phase timings, to stderr |
 | `--threads N` | worker threads (0 chooses automatically) |
 
 ```console
 rkgrep -w handle_request src/        whole words, under src/
+rkgrep -e Claims -e refresh          two symbols, one budget, answers alternating
+rkgrep -d validate_token             only where it is declared
 rkgrep -t 8000 -g '*.py' Config      bigger budget, Python only
+rkgrep --since main -C TODO          comments in what this branch changed
+rkgrep -l TODO | rkgrep --fetch -    survey cheaply, then read what matters
+rkgrep --vimgrep parse_url           one jumpable line per match
 rkgrep --json parse_url | jq .       structured output
-rkgrep -l TODO                       anchors only
-rkgrep -C TODO                       comments only, with the code they sit in
 ```
 
 Exit status follows grep: `0` matched, `1` did not, `2` error. Every span leads

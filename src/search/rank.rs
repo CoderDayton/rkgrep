@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::spans::identifier_tokens;
 
+use super::query::Query;
 use super::walk::FileMatches;
 use super::Hit;
 
@@ -63,7 +64,7 @@ pub fn query_terms(pattern: &str) -> Vec<String> {
 }
 
 /// How much a file's own name looks like what was asked for.
-pub(super) fn path_score(path: &str, terms: &[String]) -> f64 {
+fn path_score(path: &str, terms: &[String]) -> f64 {
     if terms.is_empty() {
         return 0.0;
     }
@@ -101,12 +102,31 @@ pub(super) fn span_score(text: &str, terms: &[String], matches: usize, path_scor
 
 /// A matching file with its ranking signals resolved.
 ///
-/// `path_score` is computed once here rather than inside the ordering
-/// comparator: it lowercases and splits the file name into a `Vec<String>`,
+/// The path scores are computed once here rather than inside the ordering
+/// comparator: each lowercases and splits the file name into a `Vec<String>`,
 /// and a comparator runs O(n log n) times.
 pub(super) struct Candidate {
     pub(super) file: FileMatches,
-    pub(super) path_score: f64,
+    /// How much the file's name looks like each pattern, indexed by pattern.
+    pub(super) path_scores: Vec<f64>,
+    /// The best of those, which is what orders candidates: a file is worth
+    /// reading if it looks like the answer to any of the patterns.
+    best_path_score: f64,
+}
+
+impl Candidate {
+    pub(super) fn new(file: FileMatches, queries: &[Query]) -> Self {
+        let path_scores: Vec<f64> = queries
+            .iter()
+            .map(|query| path_score(&file.path, &query.terms))
+            .collect();
+        let best_path_score = path_scores.iter().copied().fold(0.0, f64::max);
+        Self {
+            file,
+            path_scores,
+            best_path_score,
+        }
+    }
 }
 
 /// Best first. Total, because paths are unique, so the order does not depend
@@ -117,8 +137,8 @@ pub(super) fn better_candidate(a: &Candidate, b: &Candidate) -> std::cmp::Orderi
         .cmp(&a.file.declaration_hint)
         .then(b.file.match_count.cmp(&a.file.match_count))
         .then(
-            b.path_score
-                .partial_cmp(&a.path_score)
+            b.best_path_score
+                .partial_cmp(&a.best_path_score)
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
         .then(a.file.path.cmp(&b.file.path))

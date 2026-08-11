@@ -85,11 +85,12 @@ pub(super) struct FileMatches {
     pub(super) declaration_hint: bool,
 }
 
-pub(super) fn collect_matches(
-    matcher: &RegexMatcher,
-    root: &Path,
-    opts: &Options,
-) -> Result<Vec<FileMatches>> {
+/// The walker one run needs, with the ignore rules the flags asked for.
+///
+/// An explicit path list is the caller's own choice of files, so ignore rules
+/// do not get to remove any of them. Globs still apply: those are part of the
+/// same request.
+fn walker(root: &Path, opts: &Options) -> Result<Option<WalkBuilder>> {
     let mut overrides = OverrideBuilder::new(root);
     for glob in &opts.globs {
         overrides
@@ -98,16 +99,96 @@ pub(super) fn collect_matches(
     }
     let overrides = overrides.build().context("could not build glob set")?;
 
-    let mut builder = WalkBuilder::new(root);
+    let explicit = opts.paths.is_some();
+    let mut builder = match opts.paths.as_deref() {
+        // Asked for nothing, so nothing is searched. Distinct from no list at
+        // all, which walks the root.
+        Some([]) => return Ok(None),
+        Some([first, rest @ ..]) => {
+            let mut builder = WalkBuilder::new(first);
+            for path in rest {
+                builder.add(path);
+            }
+            builder
+        }
+        None => WalkBuilder::new(root),
+    };
     builder
         .overrides(overrides)
-        .hidden(!opts.hidden)
-        .git_ignore(!opts.no_ignore)
-        .git_global(!opts.no_ignore)
-        .git_exclude(!opts.no_ignore);
+        .hidden(!(opts.hidden || explicit))
+        .git_ignore(!(opts.no_ignore || explicit))
+        .git_global(!(opts.no_ignore || explicit))
+        .git_exclude(!(opts.no_ignore || explicit));
     if opts.threads > 0 {
         builder.threads(opts.threads);
     }
+    Ok(Some(builder))
+}
+
+/// One searcher per worker thread; it is never shared across them.
+fn scout_searcher() -> Searcher {
+    SearcherBuilder::new()
+        // Line numbers are the single most expensive option here -- on a
+        // 92k-file tree they cost four times the rest of the search -- and
+        // this phase only decides which files are worth opening. They are
+        // resolved later, per candidate, by `matched_lines`.
+        .line_number(false)
+        // Stop at the first NUL rather than scanning a binary to the end.
+        .binary_detection(BinaryDetection::quit(0))
+        // Memory mapping is deliberately left off: measured against that same
+        // tree it doubled search time, because per-file mmap setup dominates
+        // when most files are small.
+        .build()
+}
+
+/// Match count and declaration hint for one file, or `None` if it is not a
+/// file, could not be read, or did not match.
+///
+/// Search via the path so the engine can memory-map, detect binary files and
+/// stop early. Reading every file up front to reuse one buffer costs more than
+/// re-reading the few that match: most files in a tree do not match, and
+/// paying full I/O plus UTF-8 validation for all of them dwarfs a second read
+/// of a handful.
+///
+/// Comment scoping is the exception: the comments have to be cut out of the
+/// file before the pattern sees it, so the file is read here and the mask is
+/// searched in its place. The counts this phase produces then rank files by
+/// their comment matches rather than by matches the query will never be shown.
+fn scout_file(
+    searcher: &mut Searcher,
+    matcher: &RegexMatcher,
+    path: &Path,
+    comments_only: bool,
+) -> Option<(usize, bool)> {
+    let mut sink = ScoutSink {
+        matcher,
+        matches: 0,
+        declaration_hint: false,
+    };
+    let searched = if comments_only {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                searcher.search_slice(matcher, comment_source(&content).as_bytes(), &mut sink)
+            }
+            Err(err) => Err(err),
+        }
+    } else {
+        searcher.search_path(matcher, path, &mut sink)
+    };
+    match searched.is_err() || sink.matches == 0 {
+        true => None,
+        false => Some((sink.matches, sink.declaration_hint)),
+    }
+}
+
+pub(super) fn collect_matches(
+    matcher: &RegexMatcher,
+    root: &Path,
+    opts: &Options,
+) -> Result<Vec<FileMatches>> {
+    let Some(builder) = walker(root, opts)? else {
+        return Ok(Vec::new());
+    };
 
     // A channel rather than a shared Vec behind a mutex: on a large tree,
     // tens of thousands of files match and every one of them would contend
@@ -126,19 +207,7 @@ pub(super) fn collect_matches(
         // compiled program is behind an `Arc` -- and gives each worker its own
         // pool.
         let matcher = matcher.clone();
-        // One searcher per worker thread; it is not shared across them.
-        let mut searcher = SearcherBuilder::new()
-            // Line numbers are the single most expensive option here -- on a
-            // 92k-file tree they cost four times the rest of the search -- and
-            // this phase only decides which files are worth opening. They are
-            // resolved later, per candidate, by `matched_lines`.
-            .line_number(false)
-            // Stop at the first NUL rather than scanning a binary to the end.
-            .binary_detection(BinaryDetection::quit(0))
-            // Memory mapping is deliberately left off: measured against that
-            // same tree it doubled search time, because per-file mmap setup
-            // dominates when most files are small.
-            .build();
+        let mut searcher = scout_searcher();
 
         Box::new(move |entry| {
             let Ok(entry) = entry else {
@@ -147,42 +216,13 @@ pub(super) fn collect_matches(
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 return ignore::WalkState::Continue;
             }
-            // Search via the path so the engine can memory-map, detect binary
-            // files and stop early. Reading every file up front to reuse one
-            // buffer costs more than re-reading the few that match: most
-            // files in a tree do not match, and paying full I/O plus UTF-8
-            // validation for all of them dwarfs a second read of a handful.
-            //
-            // Comment scoping is the exception: the comments have to be cut
-            // out of the file before the pattern sees it, so the file is read
-            // here and the mask is searched in its place. The counts this
-            // phase produces then rank files by their comment matches rather
-            // than by matches the query will never be shown.
-            let mut sink = ScoutSink {
-                matcher: &matcher,
-                matches: 0,
-                declaration_hint: false,
-            };
-            let searched = if comments_only {
-                match std::fs::read_to_string(entry.path()) {
-                    Ok(content) => searcher.search_slice(
-                        &matcher,
-                        comment_source(&content).as_bytes(),
-                        &mut sink,
-                    ),
-                    Err(err) => Err(err),
-                }
-            } else {
-                searcher.search_path(&matcher, entry.path(), &mut sink)
-            };
-            if searched.is_err() || sink.matches == 0 {
+            let Some((match_count, declaration_hint)) =
+                scout_file(&mut searcher, &matcher, entry.path(), comments_only)
+            else {
                 return ignore::WalkState::Continue;
-            }
-            let (match_count, declaration_hint) = (sink.matches, sink.declaration_hint);
-
-            let path = relative_path(&root, entry.path());
+            };
             let _ = tx.send(FileMatches {
-                path,
+                path: relative_path(&root, entry.path()),
                 absolute: entry.path().to_path_buf(),
                 match_count,
                 declaration_hint,
