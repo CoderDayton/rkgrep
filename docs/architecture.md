@@ -190,7 +190,12 @@ crowded module from taking everything.
 | File | Holds |
 | --- | --- |
 | `src/main.rs` | CLI, exit codes, stats output |
-| `src/search.rs` | walk, ranking, regions, packing, timings |
+| `src/search/mod.rs` | the pipeline end to end, plus `Hit`, `Options`, timings |
+| `src/search/walk.rs` | the parallel pass over the tree and its scout sink |
+| `src/search/region.rs` | matched lines to declaration-scoped regions, merged |
+| `src/search/extract.rs` | reading candidates best-first, spans in parallel |
+| `src/search/rank.rs` | the weights, and every ordering decision |
+| `src/search/pack.rs` | filling the token budget from the ranked list |
 | `src/spans.rs` | masking, the four declaration shapes, nesting |
 | `src/tokenizer/` | `o200k_base` token counting against a compile-time table |
 | `build.rs` | lays that table out, so startup maps it instead of building it |

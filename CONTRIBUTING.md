@@ -57,7 +57,7 @@ These are load bearing and not obvious from the code.
 - Masking runs before matching, and masked bytes become spaces rather than
   being removed, so line numbers taken from masked text stay valid against the
   original. See [Masking](docs/extraction.md#masking).
-- The scout pass has its own `Sink` (`ScoutSink` in `src/search.rs`) because
+- The scout pass has its own `Sink` (`ScoutSink` in `src/search/walk.rs`) because
   `grep_searcher::sinks::UTF8` errors when line numbers are disabled, which
   skips every file and looks fast rather than failing.
 

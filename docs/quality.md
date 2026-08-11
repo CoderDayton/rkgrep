@@ -107,7 +107,7 @@ are in [extraction](extraction.md#what-it-misses).
 Nesting depth separates a module-level `save` from the `save` method an
 unrelated class happens to have. It is charged only where a shallower
 declaration *of the same name* is competing, which is what `W_DEPTH` in
-`src/search.rs` weights.
+`src/search/rank.rs` weights.
 
 Setting that weight to zero, same corpora and queries:
 
