@@ -18,7 +18,7 @@ use super::{count, table, Vocabulary, VOCAB};
 /// The published ranks, read from the source tree rather than the built image,
 /// so a test failure separates a bad table from a bad lookup.
 fn published_ranks() -> Vec<(Vec<u8>, u32)> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/o200k_base.tiktoken");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tokenizer/o200k_base.tiktoken");
     let text = std::fs::read(path).expect("the vocabulary ships in the source tree");
     text.split(|&b| b == b'\n')
         .filter(|line| !line.is_empty())

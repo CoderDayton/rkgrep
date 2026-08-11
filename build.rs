@@ -22,7 +22,7 @@ mod table;
 mod pattern;
 
 /// The published `<base64-token> <rank>` ranks.
-const VOCAB: &str = "src/o200k_base.tiktoken";
+const VOCAB: &str = "src/tokenizer/o200k_base.tiktoken";
 
 /// Where the built vocabulary image lands, under `OUT_DIR`.
 const IMAGE: &str = "o200k_base.bin";
