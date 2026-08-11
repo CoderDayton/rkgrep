@@ -53,9 +53,11 @@ passing `--max-per-file N` alongside it puts a cap back. `--no-budget` and
 
 ```console
 $ rkgrep -w declaration_name src -t 200
-spans.rs:536-545 (fn declaration_name) [104 tok]
+spans/scan.rs:359-363 (fn declaration_name) [45 tok]
 pub fn declaration_name(line: &str) -> Option<&str> {
-    scan_declaration(line).map(|(_, name)| name)
+    scan_declaration(line)
+        .filter(|(kind, _)| kind_declares(kind))
+        .map(|(_, name)| name)
 }
 ...
 ```
@@ -73,16 +75,18 @@ span has one, then its token cost. Paths are relative to the search root.
 ```json
 [
   {
-    "path": "spans.rs",
-    "start_line": 468,
-    "end_line": 519,
+    "path": "spans/mod.rs",
+    "start_line": 65,
+    "end_line": 71,
     "symbol": "declarations",
     "kind": "fn",
-    "match_lines": [468, 488, 518],
+    "match_lines": [
+      65
+    ],
     "is_declaration": true,
     "depth": 0,
-    "tokens": 242,
-    "score": 2.886294361119891,
+    "tokens": 75,
+    "score": 2.1931471805599454,
     "text": "pub fn declarations(content: &str) -> Vec<Declaration> {\n..."
   }
 ]

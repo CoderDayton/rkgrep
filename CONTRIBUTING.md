@@ -51,7 +51,7 @@ query into walk and rank/extract, and the two phases have opposite fixes.
 
 These are load bearing and not obvious from the code.
 
-- `KEYWORDS`, `MODIFIERS`, and `CONTROL_WORDS` in `src/spans.rs` are
+- `KEYWORDS`, `MODIFIERS`, and `CONTROL_WORDS` in `src/spans/words.rs` are
   binary-searched, so they have to stay sorted. `tables_are_sorted_for_binary_search`
   enforces it.
 - Masking runs before matching, and masked bytes become spaces rather than

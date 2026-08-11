@@ -196,10 +196,14 @@ crowded module from taking everything.
 | `src/search/extract.rs` | reading candidates best-first, spans in parallel |
 | `src/search/rank.rs` | the weights, and every ordering decision |
 | `src/search/pack.rs` | filling the token budget from the ranked list |
-| `src/spans.rs` | masking, the four declaration shapes, nesting |
+| `src/spans/mod.rs` | `Declaration`, the whole-file table, and `enclosing` |
+| `src/spans/words.rs` | the keyword tables and byte sets the rules use |
+| `src/spans/mask.rs` | comments and literals blanked out, offsets preserved |
+| `src/spans/scan.rs` | the four declaration shapes, one line at a time |
+| `src/spans/body.rs` | where the body a declaration opens ends |
 | `src/tokenizer/` | `o200k_base` token counting against a compile-time table |
 | `build.rs` | lays that table out, so startup maps it instead of building it |
 | `src/render.rs` | text and JSON output |
-| `src/spans_tests.rs` | unit tests for extraction |
+| `src/spans/tests/` | unit tests for extraction, one file per module |
 | `tests/search.rs` | integration tests over the built binary |
 | `benches/` | quality and scaling harnesses |
