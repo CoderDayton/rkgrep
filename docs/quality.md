@@ -83,8 +83,8 @@ there on a tree large enough for the answer to mean something.
 
 ## Where ranking is weakest
 
-Go is the one corpus where the baseline still ranks the declaring file higher,
-by 0.003.
+Go is the one corpus where the baseline ranks the declaring file higher, by
+0.003.
 
 Rust exercises the extractor hardest. Its declarations carry the most text
 between the line's first word and the name — `pub(crate) unsafe trait`,
@@ -92,7 +92,7 @@ between the line's first word and the name — `pub(crate) unsafe trait`,
 `impl` blocks, so a name is more often declared at two depths at once. That is
 also why the depth term below is worth more on Rust than anywhere else.
 
-What it still loses there is ambiguity no text scan can settle. `mod barrier;`
+What it loses there is ambiguity no text scan can settle. `mod barrier;`
 is written in two files, and only one is the answer: the other is inside a
 `cfg_sync! { … }` block, which the grammar reads as a macro call rather than a
 module, so it never enters the ground truth. Both lines declare a module named
@@ -145,8 +145,7 @@ cargo bench --bench quality -- <repo> --lang rust --show-failures 10
 
 `--show-failures` lists the queries where the baseline ranks the declaring file
 higher, with what each system put on top. A mean says a change helped; this
-says which declaration shape it still misreads, and it is where the last three
-extraction fixes came from.
+says which declaration shape it misreads.
 
 `--lang` selects the grammar and defaults to `python`; the corpus is every file
 under `<repo>` with that language's extension, walked by the same ignore rules

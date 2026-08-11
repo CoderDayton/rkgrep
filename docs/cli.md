@@ -82,9 +82,10 @@ pattern, then the second, then the third, then back to the first. A pattern
 that runs out drops from the rotation and the others take its share. Asking
 about three symbols answers all three before it answers any of them twice.
 
-Each span belongs to exactly one pattern — the one with the most matched lines
-inside it, ties going to the earliest `-e` — so a function both patterns hit
-comes back once rather than twice under two headings. The header names it, and
+Each span belongs to exactly one pattern — the one it declares, or failing that
+the one with the most matched lines inside it, ties going to the earliest `-e` —
+so a function both patterns hit comes back once rather than twice under two
+headings. The header names it, and
 only when more than one pattern was given:
 
 ```console
@@ -114,6 +115,15 @@ when a large definition would otherwise take the whole budget. It is met by
 giving up declarations, lowest-ranked first, so the best answer is the last
 thing surrendered; a query with no references to promote keeps every
 declaration it had.
+
+`--no-budget` turns the budget off entirely: every ranked span comes back, and
+extraction runs on every matching file rather than only on the ones that could
+fit. Use it when rkgrep is standing in for `rg` and dropping a match is worse
+than a long result — ranking, span expansion and merging all still apply, so
+the output is ordered and deduplicated rather than raw. It also lifts the
+per-file cap, which exists only to stop one crowded module taking a budget;
+passing `--max-per-file N` alongside it puts a cap back. `--no-budget` and
+`-t` are mutually exclusive, so a run can never claim both.
 
 ## Choosing where to look
 
@@ -152,15 +162,6 @@ That is two hundred tokens to decide how to spend four thousand. Anchors are
 relative to the root they were surveyed under, so the same path follows them
 back: `rkgrep -l TODO src | rkgrep --fetch - src`. `--json` and `-t` apply, and
 the lines come back as asked for rather than re-snapped to declaration bounds.
-
-`--no-budget` turns the budget off entirely: every ranked span comes back, and
-extraction runs on every matching file rather than only on the ones that could
-fit. Use it when rkgrep is standing in for `rg` and dropping a match is worse
-than a long result — ranking, span expansion and merging all still apply, so
-the output is ordered and deduplicated rather than raw. It also lifts the
-per-file cap, which exists only to stop one crowded module taking a budget;
-passing `--max-per-file N` alongside it puts a cap back. `--no-budget` and
-`-t` are mutually exclusive, so a run can never claim both.
 
 ## Output
 

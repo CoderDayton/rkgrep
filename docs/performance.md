@@ -73,7 +73,7 @@ for ranking to help, and narrowing the path or the glob will beat any tuning.
 
 ## What scales
 
-The walk scales **6.9× across 32 cores**, matching ripgrep, and always did. It
+The walk scales **6.9× across 32 cores**, matching ripgrep. It
 is `ignore::WalkBuilder::build_parallel` with one searcher and one matcher per
 worker, collecting through a channel rather than a shared `Vec` behind a mutex.
 
@@ -83,7 +83,7 @@ Ranking and extraction are serial with respect to the walk, and at full width
 they are roughly a third of a query. By Amdahl that caps overall scaling around
 5–6× however many cores are added, against ripgrep's 7.6× on the same tree.
 
-**Ranking** is 3–4 ms on 15k matching files and is no longer worth attacking.
+**Ranking** is 3–4 ms on 15k matching files, too small to be worth attacking.
 `path_score` — which lowercases a file name and splits it into a `Vec<String>`
 — is computed once per candidate rather than from inside a sort comparator that
 runs O(n log n) times.
@@ -114,7 +114,7 @@ once for it.
 
 ## Measured dead ends
 
-Recorded so they are not tried again. Each was implemented and measured.
+Each was implemented and measured. Recorded so they are not tried again.
 
 | Change | Result |
 | --- | --- |
@@ -124,15 +124,13 @@ Recorded so they are not tried again. Each was implemented and measured.
 | Cloning the matcher per worker | No measurable change on this workload; kept, because it is correct and free |
 | Raising the thread count past 16 | Flat to slightly worse |
 
-Two of these were pursued on the theory that the scaling gap came from lock
-contention inside the regex crate's cache pool. A threaded simulation refuted
-it: drag at 32 threads was ~3× for the shared regex *and* for a plain byte
-scanner, which makes it a machine effect rather than a lock. The gap was the
-serial phases, which only phase-level instrumentation showed.
+The scaling gap is not lock contention inside the regex crate's cache pool.
+Drag at 32 threads is ~3× for the shared regex *and* for a plain byte scanner,
+which makes it a machine effect rather than a lock. The gap is the serial
+phases, which only phase-level instrumentation shows.
 
-The one change that survived from that line of work — replacing the
-declaration regex with a hand-written scan — is worth 12–23% single-threaded,
-for reasons unrelated to threading.
+Replacing the declaration regex with a hand-written scan is worth 12–23%
+single-threaded, for reasons unrelated to threading.
 
 ## Methodology
 

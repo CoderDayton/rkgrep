@@ -13,6 +13,7 @@ parsed text.
 - [The candidate cut](#the-candidate-cut)
 - [Ranking](#ranking)
 - [Regions and merging](#regions-and-merging)
+- [Several patterns](#several-patterns)
 - [Packing](#packing)
 - [Module layout](#module-layout)
 
