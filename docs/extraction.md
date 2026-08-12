@@ -161,6 +161,12 @@ blank line neither ends a body nor extends one, so a paragraph break inside a
 function does not close it and a span does not trail off into the gap below its
 last statement.
 
+Every declaration's body is resolved in one pass over the file — a stack of
+still-open indents, read backwards — rather than one forward scan per
+declaration. A file whose indentation only ever deepens would otherwise make
+each scan walk nearly the whole remainder, squaring the cost with the file's
+length.
+
 Stopping at the first nested declaration is what keeps a class to its header.
 The body of a class is its methods, and each of those is already a span in its
 own right, so returning the class whole returns them a second time and spends a

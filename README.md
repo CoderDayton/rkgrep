@@ -100,6 +100,7 @@ rkgrep PATTERN [PATH]
 | `--fetch ANCHOR` | return the lines an anchor names, from under the root; `-` reads stdin |
 | `--vimgrep` | one line per matched line as `path:line:col:text`, every match |
 | `--json` | machine-readable output |
+| `--color auto\|always\|never` | colorize headers and matched lines |
 | `--stats` | spans, tokens, and per-phase timings, to stderr |
 | `--threads N` | worker threads (0 chooses automatically) |
 
