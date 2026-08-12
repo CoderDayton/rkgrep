@@ -1,4 +1,11 @@
 //! Output formatting.
+//!
+//! Every renderer writes as it goes rather than returning one finished string.
+//! A result set with no budget on it is the whole of what a query matched, and
+//! holding that twice — once as spans, once as the text of them — is what
+//! decides whether a large repository is searchable at all.
+
+use std::io::{self, Write};
 
 use crate::search::Hit;
 
@@ -23,35 +30,41 @@ pub struct Style {
 }
 
 /// Anchored, model-readable rendering of a result set.
-pub fn render_text(hits: &[Hit], style: Style) -> String {
+pub fn render_text(out: &mut impl Write, hits: &[Hit], style: Style) -> io::Result<()> {
     let (dim, bold, reset) = match style.color {
         true => (DIM, BOLD, RESET),
         false => ("", "", ""),
     };
-    let mut out = String::new();
+    let mut chunk = String::new();
     for (i, hit) in hits.iter().enumerate() {
+        chunk.clear();
         if i > 0 && style.text {
-            out.push('\n');
+            chunk.push('\n');
         }
-        out.push_str(bold);
-        out.push_str(&hit.anchor());
-        out.push_str(reset);
+        chunk.push_str(bold);
+        chunk.push_str(&hit.anchor());
+        chunk.push_str(reset);
         if let (Some(symbol), Some(kind)) = (&hit.symbol, &hit.kind) {
-            out.push_str(&format!(" {dim}({kind} {symbol}){reset}"));
+            chunk.push_str(&format!(" {dim}({kind} {symbol}){reset}"));
         }
-        out.push_str(&format!(" {dim}[{} tok]{reset}", hit.tokens()));
+        chunk.push_str(&format!(" {dim}[{} tok]{reset}", hit.tokens()));
         if style.queries {
-            out.push_str(&format!(" {dim}for {}{reset}", hit.query));
+            chunk.push_str(&format!(" {dim}for {}{reset}", hit.query));
         }
-        out.push('\n');
+        chunk.push('\n');
         if style.text {
-            push_source(&mut out, hit, style);
+            push_source(&mut chunk, hit, style);
         }
+        // However many blank lines the last span ends on, the run ends on one.
+        if i + 1 == hits.len() {
+            while chunk.ends_with('\n') {
+                chunk.pop();
+            }
+            chunk.push('\n');
+        }
+        out.write_all(chunk.as_bytes())?;
     }
-    while out.ends_with('\n') {
-        out.pop();
-    }
-    out
+    Ok(())
 }
 
 /// A span's source, with its matched lines told apart from the rest.
@@ -90,32 +103,45 @@ fn located(root: &str, path: &str) -> String {
 }
 
 /// One line per match, as `path:line:col:text`.
-pub fn render_vimgrep(hits: &[Hit], root: &str) -> String {
+pub fn render_vimgrep(out: &mut impl Write, hits: &[Hit], root: &str) -> io::Result<()> {
     let mut matches: Vec<(&str, u64, u64, &str)> = Vec::new();
     for hit in hits {
+        // The lines of a span in one pass, rather than a fresh scan from its
+        // start for each match landing in it.
+        let mut lines = hit.text.lines().enumerate();
+        let mut at_line = |wanted: u64| {
+            let offset = wanted.checked_sub(hit.start_line)? as usize;
+            lines
+                .find(|(seen, _)| *seen == offset)
+                .map(|(_, text)| text)
+        };
         for (at, line) in hit.match_lines.iter().enumerate() {
             let column = hit.match_columns.get(at).copied().unwrap_or(1);
             matches.push((
                 hit.path.as_str(),
                 *line,
                 column,
-                hit.line(*line).unwrap_or(""),
+                at_line(*line).unwrap_or(""),
             ));
         }
     }
 
     matches.sort_unstable_by_key(|(path, line, ..)| (*path, *line));
 
-    let mut out = String::new();
     for (path, line, column, text) in matches {
-        out.push_str(&format!("{}:{line}:{column}:{text}\n", located(root, path)));
+        writeln!(out, "{}:{line}:{column}:{text}", located(root, path))?;
     }
-    while out.ends_with('\n') {
-        out.pop();
-    }
-    out
+    Ok(())
 }
 
-pub fn render_json(hits: &[Hit]) -> String {
-    serde_json::to_string_pretty(hits).unwrap_or_else(|_| "[]".to_string())
+pub fn render_json(out: &mut impl Write, hits: &[Hit]) -> io::Result<()> {
+    if let Err(err) = serde_json::to_writer_pretty(&mut *out, hits) {
+        // Keep the kind of a write that failed, so a closed pipe stays
+        // tellable from a real error.
+        return Err(match err.io_error_kind() {
+            Some(kind) => io::Error::from(kind),
+            None => io::Error::other(err),
+        });
+    }
+    out.write_all(b"\n")
 }

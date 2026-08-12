@@ -135,10 +135,11 @@ searches nothing.
 git ls-files '*.rs' | rkgrep --files-from - Options
 ```
 
-`--since REF` fills the same list from git: everything that differs from `REF`,
-plus files git does not track yet. The working tree is compared against the
-ref rather than one commit against another, so `--since HEAD` is uncommitted
-work and `--since main` is the branch.
+`--since REF` fills the same list from git: everything this branch changed since
+it left `REF`, plus files git does not track yet. The working tree is compared
+against the point the two histories diverged rather than against `REF` itself,
+so commits made on `REF` after the split stay out of the list. `--since HEAD` is
+uncommitted work and `--since main` is the branch.
 
 ```console
 rkgrep --since main -C TODO         comments in what this branch changed
@@ -162,6 +163,11 @@ That is two hundred tokens to decide how to spend four thousand. Anchors are
 relative to the root they were surveyed under, so the same path follows them
 back: `rkgrep -l TODO src | rkgrep --fetch - src`. `--json` and `-t` apply, and
 the lines come back as asked for rather than re-snapped to declaration bounds.
+
+An anchor naming a file outside that root is refused, whether it climbs out
+with `..`, arrives already absolute, or comes in on stdin. Only the range asked
+for is held, so fetching six lines costs six lines however large the file
+holding them.
 
 ## Output
 
@@ -268,16 +274,18 @@ An empty result is an empty array, never absent output.
 
 ## Stats
 
-`--stats` writes two lines to stderr, leaving stdout clean for a pipe:
+`--stats` writes three lines to stderr, leaving stdout clean for a pipe:
 
 ```console
 $ rkgrep function ~/src --stats >/dev/null
-rkgrep: 7 spans, 1998/2000 tokens, 50.0ms total
-rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files read)
+rkgrep: 8 spans, 1985/2000 tokens, 24.8ms total
+rkgrep: walk 7.6ms (68 files matched), rank 0.1ms, extract 14.1ms (8 files read)
+rkgrep: pack 2.6ms, render 0.0ms
 ```
 
-The two counts are the ones to read first: files matched versus files read. See
-[Performance](performance.md#the-phase-model).
+The two counts are the ones to read first: files matched versus files read. The
+five phases account for the whole query, so a total far above their sum is
+startup, not search. See [Performance](performance.md#the-phase-model).
 
 ## Exit codes
 
@@ -285,6 +293,10 @@ The two counts are the ones to read first: files matched versus files read. See
 | --- | --- |
 | `0` | something matched |
 | `1` | nothing matched |
-| `2` | bad pattern, bad glob, bad anchor, or a path that does not exist |
+| `2` | bad pattern, bad glob, bad anchor, an anchor outside the root, or a path that does not exist |
+
+A closed pipe is not a failure: `rkgrep … \| head` exits on what it matched. Any
+other write that fails is reported and exits `2`, so a truncated file never
+passes for a complete one.
 
 As grep does, so `rkgrep -l TODO && echo found` works.

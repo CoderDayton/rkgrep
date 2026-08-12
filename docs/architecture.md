@@ -29,15 +29,16 @@ extract   parallel   read candidates, find declarations, resolve line numbers
 pack      serial     fill the token budget, best first
 ```
 
-`--stats` reports the first three:
+`--stats` reports every phase, plus the write that follows them:
 
 ```console
 $ rkgrep function ~/src --stats
-rkgrep: 7 spans, 1998/2000 tokens, 50.0ms total
-rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files read)
+rkgrep: 8 spans, 1985/2000 tokens, 24.8ms total
+rkgrep: walk 7.6ms (68 files matched), rank 0.1ms, extract 14.1ms (8 files read)
+rkgrep: pack 2.6ms, render 0.0ms
 ```
 
-15,526 files matched and 8 were read. That ratio is the whole design.
+68 files matched and 8 were read. That ratio is the whole design.
 
 ## Two-phase search
 

@@ -262,13 +262,29 @@ fn path_set(cli: &Cli, root: &std::path::Path) -> anyhow::Result<Option<Vec<Path
     Ok(None)
 }
 
-fn write_out(rendered: &str) {
+/// Write a result set out.
+///
+/// A closed pipe is not a failure — `rkgrep … | head` is a reader that stopped,
+/// which is its right. Anything else is: a run that could not write what it
+/// found has not answered the question, and saying so beats a truncated file
+/// and a successful exit.
+fn emit(hits: &[Hit], json: bool, vimgrep: bool, style: Style, root: &str) -> Result<(), ExitCode> {
     let out = io::stdout();
     let mut out = io::BufWriter::new(out.lock());
-    if !rendered.is_empty() {
-        let _ = writeln!(out, "{rendered}");
+    let written = match (json, vimgrep) {
+        (true, _) => render_json(&mut out, hits),
+        (_, true) => render_vimgrep(&mut out, hits, root),
+        _ => render_text(&mut out, hits, style),
     }
-    let _ = out.flush();
+    .and_then(|()| out.flush());
+    match written {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => {
+            eprintln!("rkgrep: writing output: {err}");
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 fn exit_code(hits: &[Hit]) -> ExitCode {
@@ -288,13 +304,10 @@ fn run_fetch(cli: &Cli, style: Style, budget: Option<usize>) -> ExitCode {
         }
     };
     match fetch::fetch(&cli.fetch, &root, budget) {
-        Ok(hits) => {
-            write_out(&match cli.json {
-                true => render_json(&hits),
-                false => render_text(&hits, style),
-            });
-            exit_code(&hits)
-        }
+        Ok(hits) => match emit(&hits, cli.json, false, style, "") {
+            Ok(()) => exit_code(&hits),
+            Err(code) => code,
+        },
         Err(err) => {
             eprintln!("rkgrep: {err:#}");
             ExitCode::from(2)
@@ -309,6 +322,13 @@ fn report_gaps(patterns: &[String], found: &search::Results, kinds: &[String]) {
     }
     if found.hits.is_empty() && !kinds.is_empty() {
         eprintln!("rkgrep: nothing of that kind; kinds come from the declaring keyword");
+    }
+    let oversized = spans::oversized_files();
+    if oversized > 0 {
+        eprintln!(
+            "rkgrep: skipped {oversized} files over {} MiB",
+            spans::MAX_SOURCE_BYTES / (1024 * 1024)
+        );
     }
 }
 
@@ -356,6 +376,11 @@ fn print_stats(found: &search::Results, budget: Option<usize>, started: Instant)
         ms(found.timings.rank),
         ms(found.timings.extract),
         found.timings.read_files,
+    );
+    eprintln!(
+        "rkgrep: pack {:.1}ms, render {:.1}ms",
+        ms(found.timings.pack),
+        ms(found.timings.render),
     );
 }
 
@@ -407,7 +432,7 @@ fn main() -> ExitCode {
 
     let opts = options(&cli, paths, budget);
 
-    let found = match search(&patterns, &root, &opts) {
+    let mut found = match search(&patterns, &root, &opts) {
         Ok(found) => found,
         Err(err) => {
             eprintln!("rkgrep: {err:#}");
@@ -416,11 +441,18 @@ fn main() -> ExitCode {
     };
 
     style.queries = patterns.len() > 1;
-    write_out(&match (cli.json, cli.vimgrep) {
-        (true, _) => render_json(&found.hits),
-        (_, true) => render_vimgrep(&found.hits, &path.to_string_lossy()),
-        _ => render_text(&found.hits, style),
-    });
+    let rendering = Instant::now();
+    let written = emit(
+        &found.hits,
+        cli.json,
+        cli.vimgrep,
+        style,
+        &path.to_string_lossy(),
+    );
+    found.timings.render = rendering.elapsed();
+    if let Err(code) = written {
+        return code;
+    }
 
     report_gaps(&patterns, &found, &opts.kinds);
 

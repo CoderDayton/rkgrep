@@ -24,6 +24,8 @@ mod pattern;
 mod table;
 
 use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::LazyLock;
 
 use regex_automata::dfa::{dense, Automaton};
@@ -69,9 +71,9 @@ static ANCHORED_START: LazyLock<StateID> = LazyLock::new(|| {
 });
 
 thread_local! {
-    /// The merge buffer, one per thread, reused across pieces so a text of a
-    /// thousand pieces allocates once.
-    static SCRATCH: RefCell<Vec<Part>> = const { RefCell::new(Vec::new()) };
+    /// The merge working set, one per thread, reused across pieces so a text
+    /// of a thousand pieces allocates once.
+    static SCRATCH: RefCell<Merges> = const { RefCell::new(Merges::new()) };
 }
 
 /// The probe table, resolved from [`IMAGE`] once.
@@ -173,10 +175,10 @@ pub fn count(text: &str) -> usize {
 /// The number of `o200k_base` tokens in `text`, or `limit` if there are more.
 pub fn count_capped(text: &str, limit: usize) -> usize {
     let vocab = &*VOCAB;
-    SCRATCH.with_borrow_mut(|parts| {
+    SCRATCH.with_borrow_mut(|work| {
         let mut total = 0;
         split(text, |piece| {
-            total += merge_count(piece.as_bytes(), vocab, parts);
+            total += merge_count(piece.as_bytes(), vocab, work);
             total < limit
         });
         total.min(limit)
@@ -266,61 +268,129 @@ fn piece_end(
     last
 }
 
-/// One boundary in the piece being merged: where it starts, and the rank of the
-/// pair that would form if it merged with the boundary after it.
-#[derive(Clone, Copy)]
-struct Part {
-    start: u32,
-    rank: u32,
+/// The working set for one piece's merge.
+///
+/// A boundary is a byte offset into the piece. They are linked, so dropping one
+/// costs nothing but two writes, and queued by rank, so the next merge is a pop
+/// rather than a scan of every boundary still standing. Together those make a
+/// piece cost `n log n` instead of `n²`, which is what keeps one long
+/// unbroken run of letters — a minified bundle, a base64 blob — from stalling
+/// a whole query.
+struct Merges {
+    /// The next surviving boundary after each one, or [`Merges::NONE`].
+    next: Vec<u32>,
+    /// The previous surviving boundary, or [`Merges::NONE`].
+    prev: Vec<u32>,
+    /// The rank of the pair each boundary would form with the one after it.
+    rank: Vec<u32>,
+    /// Merges still to consider, lowest rank first and ties to the leftmost.
+    /// An entry is left behind rather than removed when a rank changes, so a
+    /// pop counts only when it still agrees with [`Merges::rank`].
+    queue: BinaryHeap<Reverse<(u32, u32)>>,
+}
+
+impl Merges {
+    /// No such boundary: the ends of the piece, and everything dropped.
+    const NONE: u32 = u32::MAX;
+
+    const fn new() -> Self {
+        Self {
+            next: Vec::new(),
+            prev: Vec::new(),
+            rank: Vec::new(),
+            queue: BinaryHeap::new(),
+        }
+    }
+
+    /// One boundary per byte of a piece of `len`, plus one past the end.
+    fn reset(&mut self, len: usize) {
+        self.next.clear();
+        self.prev.clear();
+        self.rank.clear();
+        self.queue.clear();
+        self.next.extend((0..=len).map(|at| match at == len {
+            true => Self::NONE,
+            false => at as u32 + 1,
+        }));
+        self.prev.extend((0..=len).map(|at| match at {
+            0 => Self::NONE,
+            _ => at as u32 - 1,
+        }));
+        self.rank.resize(len + 1, u32::MAX);
+    }
+
+    /// The rank of the pair `at` opens, or [`u32::MAX`] if it opens none.
+    fn pair_rank(&self, piece: &[u8], vocab: &Vocabulary, at: u32) -> u32 {
+        let middle = self.next[at as usize];
+        if middle == Self::NONE {
+            return u32::MAX;
+        }
+        let end = self.next[middle as usize];
+        if end == Self::NONE {
+            return u32::MAX;
+        }
+        vocab
+            .rank(&piece[at as usize..end as usize])
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Record what `at` is worth now, queueing it while a merge is possible.
+    fn set_rank(&mut self, at: u32, rank: u32) {
+        self.rank[at as usize] = rank;
+        if rank != u32::MAX {
+            self.queue.push(Reverse((rank, at)));
+        }
+    }
+
+    /// Drop the boundary after `at`, joining the two tokens it separated.
+    fn unlink_after(&mut self, at: u32) {
+        let dropped = self.next[at as usize];
+        let after = self.next[dropped as usize];
+        self.next[at as usize] = after;
+        if after != Self::NONE {
+            self.prev[after as usize] = at;
+        }
+        self.rank[dropped as usize] = u32::MAX;
+        self.next[dropped as usize] = Self::NONE;
+    }
 }
 
 /// Tokens `piece` merges into.
-fn merge_count(piece: &[u8], vocab: &Vocabulary, parts: &mut Vec<Part>) -> usize {
+///
+/// The lowest-ranked pair merges first and ties go to the leftmost, which is
+/// what makes the count tiktoken's for the same input.
+fn merge_count(piece: &[u8], vocab: &Vocabulary, work: &mut Merges) -> usize {
     if piece.len() <= 1 || vocab.rank(piece).is_some() {
         return 1;
     }
-
-    parts.clear();
-    parts.reserve(piece.len() + 1);
-    for start in 0..=piece.len() {
-        parts.push(Part {
-            start: start as u32,
-            rank: u32::MAX,
-        });
+    work.reset(piece.len());
+    for at in 0..=piece.len() as u32 {
+        let rank = work.pair_rank(piece, vocab, at);
+        work.set_rank(at, rank);
     }
 
-    let pair_rank = |parts: &[Part], i: usize| -> u32 {
-        parts
-            .get(i + 2)
-            .and_then(|end| vocab.rank(&piece[parts[i].start as usize..end.start as usize]))
-            .unwrap_or(u32::MAX)
-    };
-    for i in 0..parts.len().saturating_sub(2) {
-        parts[i].rank = pair_rank(parts, i);
-    }
-
-    loop {
-        if parts.len() == 1 {
+    let mut boundaries = piece.len() + 1;
+    while boundaries > 1 {
+        let Some(Reverse((rank, at))) = work.queue.pop() else {
             break;
+        };
+        // Stale: `at`'s pair changed, or `at` was itself dropped, after this
+        // entry was queued. Either way a live entry for it is queued too.
+        if work.rank[at as usize] != rank {
+            continue;
         }
-        let mut best = u32::MAX;
-        let mut best_at = 0;
-        for (i, part) in parts[..parts.len() - 1].iter().enumerate() {
-            if part.rank < best {
-                best = part.rank;
-                best_at = i;
-            }
-        }
-        if best == u32::MAX {
-            break;
-        }
-        parts.remove(best_at + 1);
-        parts[best_at].rank = pair_rank(parts, best_at);
-        if best_at > 0 {
-            parts[best_at - 1].rank = pair_rank(parts, best_at - 1);
+        work.unlink_after(at);
+        boundaries -= 1;
+
+        let rank = work.pair_rank(piece, vocab, at);
+        work.set_rank(at, rank);
+        let before = work.prev[at as usize];
+        if before != Merges::NONE {
+            let rank = work.pair_rank(piece, vocab, before);
+            work.set_rank(before, rank);
         }
     }
-    parts.len() - 1
+    boundaries - 1
 }
 
 /// Read one byte from every page of the embedded images.

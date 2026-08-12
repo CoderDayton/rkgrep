@@ -358,6 +358,36 @@ fn since_searches_only_what_changed() {
 }
 
 #[test]
+fn since_ignores_commits_made_on_the_reference_after_the_split() {
+    let dir = tree();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "base"]);
+    git(dir.path(), &["branch", "-m", "base"]);
+
+    git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    fs::write(
+        dir.path().join("src/api.py"),
+        format!("{API}\n\ndef extra():\n    return validate_token(1)\n"),
+    )
+    .expect("write");
+    git(dir.path(), &["commit", "-qam", "mine"]);
+
+    git(dir.path(), &["checkout", "-q", "base"]);
+    fs::write(
+        dir.path().join("src/auth.py"),
+        format!("{AUTH}\n\ndef theirs():\n    return validate_token(2)\n"),
+    )
+    .expect("write");
+    git(dir.path(), &["commit", "-qam", "theirs"]);
+    git(dir.path(), &["checkout", "-q", "feature"]);
+
+    let (out, _, _) = stdout_and_code(dir.path(), &["--since", "base", "-l", "validate_token"]);
+    assert!(out.contains("src/api.py"), "{out:?}");
+    assert!(!out.contains("src/auth.py"), "{out:?}");
+}
+
+#[test]
 fn since_outside_a_repository_says_so() {
     let dir = tree();
     let (_, err, code) = run(dir.path(), &["--since", "HEAD", "validate_token"], None);

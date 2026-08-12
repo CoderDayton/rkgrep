@@ -76,13 +76,6 @@ impl Hit {
         *self.tokens.get_or_init(|| count_tokens(&self.text))
     }
 
-    /// The source line at `line`, which must be inside the span.
-    pub fn line(&self, line: u64) -> Option<&str> {
-        self.text
-            .lines()
-            .nth(line.checked_sub(self.start_line)? as usize)
-    }
-
     /// A span with no search behind it, which is what `--fetch` returns.
     pub fn plain(
         path: String,
@@ -160,6 +153,12 @@ pub struct Timings {
     pub rank: Duration,
     /// Serial: read candidates, extract declarations, resolve line numbers.
     pub extract: Duration,
+    /// Serial: choose which spans fit the budget, counting what each costs.
+    pub pack: Duration,
+    /// Serial: write the result set out, including the token counts the output
+    /// itself asks for. Filled in by the caller, which is what does the
+    /// writing.
+    pub render: Duration,
     /// Files the walk found matching, before any candidate cut.
     pub matching_files: usize,
     /// Files actually opened and turned into spans.
@@ -282,8 +281,12 @@ pub fn search(patterns: &[String], root: &Path, opts: &Options) -> Result<Result
 
     hits.retain(|hit| selected(hit, opts));
 
+    let packing = Instant::now();
+    let hits = pack::pack(hits, opts, queries.len());
+    timings.pack = packing.elapsed();
+
     Ok(Results {
-        hits: pack::pack(hits, opts, queries.len()),
+        hits,
         timings,
         unmatched,
     })

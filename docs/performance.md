@@ -58,7 +58,8 @@ for the hottest lookup in the program.
 
 ```console
 $ rkgrep function ~/src --stats
-rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files read)
+rkgrep: walk 7.6ms (68 files matched), rank 0.1ms, extract 14.1ms (8 files read)
+rkgrep: pack 2.6ms, render 0.0ms
 ```
 
 | Phase | Parallel | Work |
@@ -66,10 +67,16 @@ rkgrep: walk 31.2ms (15526 files matched), rank 4.0ms, extract 12.9ms (8 files r
 | `walk` | yes | every file in the tree, searched |
 | `rank` | no | every ordering decision: candidates, then the spans they yield |
 | `extract` | yes, within a batch | read candidates, extract declarations, resolve line numbers |
+| `pack` | no | fill the budget, counting what each span costs |
+| `render` | no | write the result out, and count anything the output names |
 
-The two numbers in parentheses are the ones to read first. 15,526 files matched
-and 8 were read: if that ratio is close to 1, the query is not selective enough
-for ranking to help, and narrowing the path or the glob will beat any tuning.
+The five account for the whole query. Token counting happens in whichever of
+`pack` and `render` reaches a span first, so a query with no budget on it pays
+for its `[N tok]` headers under `render`.
+
+The two numbers in parentheses are the ones to read first. 68 files matched and
+8 were read: if that ratio is close to 1, the query is not selective enough for
+ranking to help, and narrowing the path or the glob will beat any tuning.
 
 ## What scales
 

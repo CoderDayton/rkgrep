@@ -30,11 +30,39 @@ pub use mask::{comment_source, mask_source};
 pub use scan::{declaration_name, kind_declares, scan_declaration};
 pub use words::identifier_tokens;
 
-use body::{body_end, indent_of};
+use body::{body_ends, indent_of};
 
 /// Above this, ripgrep is welcome to the file but we will not build a
 /// declaration table for it.
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Files passed over for size, counted for the whole run.
+///
+/// One process serves one query, so a counter for the process is a counter for
+/// the query. Threading one through the walk and the extractor separately
+/// would buy nothing a caller could tell apart.
+static OVERSIZED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many files this run passed over for being larger than
+/// [`MAX_SOURCE_BYTES`]. A search that quietly returns less than it found is
+/// worse than one that says so.
+pub fn oversized_files() -> usize {
+    OVERSIZED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A file's text, or `None` when it is larger than [`MAX_SOURCE_BYTES`] or is
+/// not text at all.
+///
+/// The size is settled from the directory entry, before a byte is read. A file
+/// too large to extract from is one that should not be held in memory either,
+/// and a whole tree's worth of workers read at once.
+pub fn read_source(path: &std::path::Path) -> Option<String> {
+    if std::fs::metadata(path).ok()?.len() > MAX_SOURCE_BYTES as u64 {
+        OVERSIZED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declaration {
@@ -72,6 +100,7 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
         }
     }
 
+    let ends = body_ends(&lines);
     let mut open: Vec<usize> = Vec::new();
     let mut out = Vec::with_capacity(hits.len());
     for (i, (start_line, kind, name, indent)) in hits.iter().enumerate() {
@@ -82,7 +111,7 @@ pub fn declarations(content: &str) -> Vec<Declaration> {
         // in file order, so the next one is that first nested declaration
         // whenever the body reaches it, and a sibling the body already stops
         // above.
-        let body = body_end(&lines, *start_line, *indent);
+        let body = ends[*start_line as usize - 1];
         let end_line = match hits.get(i + 1) {
             Some((next, _, _, _)) => body.min(next.saturating_sub(1)),
             None => body,

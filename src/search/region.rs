@@ -4,6 +4,8 @@
 //! window, so a hit carries a whole function instead of six arbitrary lines.
 //! Regions that overlap merge, so the same lines are never sent twice.
 
+use std::collections::HashMap;
+
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
 
@@ -73,8 +75,6 @@ fn merge_regions(mut regions: Vec<Region>) -> Vec<Region> {
                     prev.depth = region.depth;
                 }
                 prev.matched.extend(region.matched);
-                prev.matched.sort_unstable();
-                prev.matched.dedup();
                 for (total, add) in prev.per_query.iter_mut().zip(&region.per_query) {
                     *total += add;
                 }
@@ -85,6 +85,13 @@ fn merge_regions(mut regions: Vec<Region>) -> Vec<Region> {
             }
             _ => merged.push(region),
         }
+    }
+    // Once, at the end: merging concatenates two sorted runs, and sorting
+    // after every one of them is how a file of many small declarations turns
+    // quadratic.
+    for region in &mut merged {
+        region.matched.sort_unstable();
+        region.matched.dedup();
     }
     merged
 }
@@ -143,17 +150,20 @@ pub(super) fn regions_for(
     sorted.dedup();
 
     let mut regions: Vec<Region> = Vec::new();
+    // Which region each window already belongs to. A file of fifty thousand
+    // one-line functions produces a region per match, and finding the right
+    // one by scanning them all is quadratic in that count.
+    let mut seen: HashMap<(u64, u64, bool), usize> = HashMap::new();
     for (line, query) in sorted {
         let (start, end, symbol, kind, depth) =
             window_for(decls, line, total_lines, max_declaration_lines);
         let declares = start == line
             && kind.as_deref().is_some_and(kind_declares)
             && declares_query(&queries[query].matcher, symbol.as_deref());
-        match regions
-            .iter_mut()
-            .find(|r| r.start == start && r.end == end && r.symbol.is_some() == symbol.is_some())
-        {
-            Some(existing) => {
+        let window = (start, end, symbol.is_some());
+        match seen.get(&window).copied() {
+            Some(at) => {
+                let existing = &mut regions[at];
                 existing.matched.push(line);
                 existing.per_query[query] += 1;
                 if declares {
@@ -161,6 +171,7 @@ pub(super) fn regions_for(
                 }
             }
             None => {
+                seen.insert(window, regions.len());
                 let mut per_query = vec![0usize; queries.len()];
                 per_query[query] = 1;
                 regions.push(Region {
@@ -175,10 +186,6 @@ pub(super) fn regions_for(
                 });
             }
         }
-    }
-    for region in &mut regions {
-        region.matched.sort_unstable();
-        region.matched.dedup();
     }
     merge_regions(regions)
 }

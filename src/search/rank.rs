@@ -71,11 +71,10 @@ fn path_score(path: &str, terms: &[String]) -> f64 {
     overlap as f64 / parts.len() as f64
 }
 
-fn term_overlap(text: &str, terms: &[String]) -> f64 {
+fn term_overlap(lowered: &str, terms: &[String]) -> f64 {
     if terms.is_empty() {
         return 0.0;
     }
-    let lowered = text.to_lowercase();
     let present = terms
         .iter()
         .filter(|t| lowered.contains(t.as_str()))
@@ -84,9 +83,13 @@ fn term_overlap(text: &str, terms: &[String]) -> f64 {
 }
 
 /// What one span scores before the declaration bonus and the depth penalty.
-pub(super) fn span_score(text: &str, terms: &[String], matches: usize, path_score: f64) -> f64 {
+///
+/// `lowered` is the span's own text, lowercased. The caller owns that buffer
+/// and reuses it, because a file of two hundred spans should not allocate two
+/// hundred copies of itself to be scored.
+pub(super) fn span_score(lowered: &str, terms: &[String], matches: usize, path_score: f64) -> f64 {
     W_MATCHES * ((matches + 1) as f64).ln()
-        + W_TERMS * term_overlap(text, terms)
+        + W_TERMS * term_overlap(lowered, terms)
         + W_PATH * path_score
 }
 

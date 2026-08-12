@@ -4,8 +4,8 @@
 //! paid-for read are two halves of one flow: decide what is worth reading for
 //! a couple of hundred tokens, then spend the budget only on that.
 
-use std::io::Read;
-use std::path::Path;
+use std::io::{BufRead, Read};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -57,32 +57,63 @@ fn anchors(given: &[String]) -> Result<Vec<Anchor>> {
     text.iter().map(|one| parse(one)).collect()
 }
 
+/// The file an anchor names, which has to be one under `root`.
+///
+/// Anchors are read from stdin as often as they are typed, so where they point
+/// is not the caller's own choosing. A path that resolves outside the tree
+/// being searched is refused rather than read.
+fn resolve(root: &Path, path: &str) -> Result<PathBuf> {
+    let full = root.join(path);
+    let resolved = full
+        .canonicalize()
+        .with_context(|| format!("reading {}", full.display()))?;
+    if !resolved.starts_with(root) {
+        bail!("{path} is outside {}", root.display());
+    }
+    Ok(resolved)
+}
+
+/// The lines of `path` from `start` to `end`, and how many lines it has.
+///
+/// Only the named range is held, so fetching six lines costs six lines however
+/// large the file they came from.
+fn lines_in(path: &Path, start: u64, end: u64) -> Result<(Vec<String>, u64)> {
+    let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut kept: Vec<String> = Vec::new();
+    let mut total = 0u64;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("reading {}", path.display()))?;
+        total += 1;
+        if total >= start && total <= end {
+            kept.push(line);
+        }
+    }
+    Ok((kept, total))
+}
+
 /// The lines each anchor names, in the order given, under `max_tokens`.
 pub fn fetch(given: &[String], root: &Path, max_tokens: Option<usize>) -> Result<Vec<Hit>> {
     let mut hits = Vec::new();
     let mut used = 0usize;
     for anchor in anchors(given)? {
-        let full = root.join(&anchor.path);
-        let content = std::fs::read_to_string(&full)
-            .with_context(|| format!("reading {}", full.display()))?;
-        let lines: Vec<&str> = content.lines().collect();
-        let from = (anchor.start - 1) as usize;
-        let to = (anchor.end as usize).min(lines.len());
-        if from >= to {
+        let full = resolve(root, &anchor.path)?;
+        let (lines, total) = lines_in(&full, anchor.start, anchor.end)?;
+        if lines.is_empty() {
             bail!(
                 "{}:{}-{} is past the end of a {}-line file",
                 anchor.path,
                 anchor.start,
                 anchor.end,
-                lines.len()
+                total
             );
         }
+        let to = anchor.end.min(total);
         let hit = Hit::plain(
             anchor.path.clone(),
             anchor.start,
-            to as u64,
+            to,
             format!("{}:{}-{}", anchor.path, anchor.start, to),
-            lines[from..to].join("\n"),
+            lines.join("\n"),
         );
         if max_tokens.is_some_and(|max| used + hit.tokens() > max) {
             continue;

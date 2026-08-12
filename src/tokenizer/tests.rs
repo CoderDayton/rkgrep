@@ -63,6 +63,35 @@ fn assert_matches_reference(text: &str) {
     );
 }
 
+/// One unbroken run of letters is a single piece, so the whole run merges
+/// against the vocabulary at once. That is the path the linked queue in
+/// [`super::Merges`] replaced a quadratic scan on, and the only way to know it
+/// still merges in tiktoken's order is to ask tiktoken.
+#[test]
+fn one_long_unbroken_piece_matches_the_reference() {
+    for len in [64, 500, 4096, 20_000] {
+        assert_matches_reference(&"A".repeat(len));
+        assert_matches_reference(&"deadbeef".repeat(len / 8));
+        assert_matches_reference(&"9".repeat(len));
+    }
+}
+
+/// A piece long enough that a quadratic merge would not finish. It is here as
+/// a test rather than a benchmark because a regression shows up as a suite
+/// that never returns, not as a wrong answer.
+#[test]
+fn a_very_long_piece_counts_promptly() {
+    let text = "A".repeat(1_000_000);
+    let started = std::time::Instant::now();
+    let counted = count(&text);
+    assert!(counted > 0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "counting one 1MB piece took {:?}",
+        started.elapsed()
+    );
+}
+
 #[test]
 fn the_anchored_start_state_does_not_depend_on_context() {
     use regex_automata::dfa::Automaton;

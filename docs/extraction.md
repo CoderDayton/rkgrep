@@ -180,8 +180,13 @@ declaration.
 A match outside every declaration — an import, a top-level constant, a class
 constant written below the last method — gets the same ±6-line window.
 
-Files above 8 MiB get no declaration table at all. They still match; their hits
-simply fall back to fixed windows.
+Files above 8 MiB are passed over rather than read. Extraction holds a file
+whole, and one worker per core does it at once, so the ceiling on a file is
+also the ceiling on memory. A run that skipped any says so on stderr:
+
+```console
+rkgrep: skipped 3 files over 8 MiB
+```
 
 ## What it misses
 

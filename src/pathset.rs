@@ -70,13 +70,30 @@ fn git(args: &[&str], at: &Path) -> Result<String> {
     String::from_utf8(output.stdout).context("git printed something that is not UTF-8")
 }
 
-/// Files that differ from `reference`, plus files git does not track yet.
+/// Where `HEAD` and `reference` last shared history, or `reference` itself when
+/// they share none. Diffing against this rather than `reference` keeps commits
+/// made on `reference` after the split out of the result.
+fn fork_point(reference: &str, top: &Path) -> String {
+    match git(&["merge-base", reference, "HEAD"], top) {
+        Ok(base) => base.trim().to_string(),
+        Err(_) => reference.to_string(),
+    }
+}
+
+/// Files this branch changed since it left `reference`, plus files git does not
+/// track yet.
 pub fn from_git(reference: &str, root: &Path) -> Result<Vec<PathBuf>> {
+    // git reads a leading dash as an option, and `git diff` has options that
+    // write files. A revision never starts with one.
+    if reference.starts_with('-') {
+        bail!("not a revision: {reference}");
+    }
     let top = git(&["rev-parse", "--show-toplevel"], root)
         .context("--since needs a git repository; use --files-from otherwise")?;
     let top = PathBuf::from(top.trim());
 
-    let changed = git(&["diff", "--name-only", reference], &top)
+    let base = fork_point(reference, &top);
+    let changed = git(&["diff", "--name-only", base.as_str()], &top)
         .with_context(|| format!("no such revision: {reference}"))?;
     let untracked = git(&["ls-files", "--others", "--exclude-standard"], &top)?;
 

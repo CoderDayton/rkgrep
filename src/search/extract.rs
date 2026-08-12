@@ -15,7 +15,7 @@ use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{Searcher, SearcherBuilder};
 
-use crate::spans::{comment_source, declarations};
+use crate::spans::{comment_source, declarations, read_source};
 use crate::tokenizer::count_capped;
 
 use super::query::{Queries, Query};
@@ -121,7 +121,7 @@ impl Extraction {
 /// Every span one candidate file contributes.
 fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> Vec<Hit> {
     let file = &candidate.file;
-    let Ok(content) = std::fs::read_to_string(&file.absolute) else {
+    let Some(content) = read_source(&file.absolute) else {
         return Vec::new();
     };
     let lines: Vec<&str> = content.lines().collect();
@@ -148,6 +148,7 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
     };
 
     let mut hits = Vec::new();
+    let mut lowered = String::new();
     for region in regions_for(
         &decls,
         &matched,
@@ -163,8 +164,10 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
         let owner = region.owner();
         let answered = region.answered();
         let text = lines[from..to].join("\n");
+        lowered.clear();
+        lowered.extend(text.chars().flat_map(char::to_lowercase));
         let score = span_score(
-            &text,
+            &lowered,
             &queries[owner].terms,
             region.matched.len(),
             candidate.path_scores[owner],
@@ -216,7 +219,14 @@ fn spans_for_batch(batch: &[Candidate], queries: &[Query], ex: &Extraction) -> V
             })
             .collect();
         for handle in handles {
-            for (at, hits) in handle.join().unwrap_or_default() {
+            // A worker that panicked has dropped its share of the results.
+            // Carrying on would return a short answer that looks like a
+            // complete one, so the panic is carried to the main thread instead.
+            let share = match handle.join() {
+                Ok(share) => share,
+                Err(panicked) => std::panic::resume_unwind(panicked),
+            };
+            for (at, hits) in share {
                 out[at] = hits;
             }
         }

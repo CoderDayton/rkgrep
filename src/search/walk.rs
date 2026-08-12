@@ -14,7 +14,7 @@ use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch}
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 
-use crate::spans::{comment_source, declaration_name};
+use crate::spans::{comment_source, declaration_name, read_source};
 
 use super::region::declares_query;
 use super::Options;
@@ -124,12 +124,10 @@ fn scout_file(
         declaration_hint: false,
     };
     let searched = if comments_only {
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                searcher.search_slice(matcher, comment_source(&content).as_bytes(), &mut sink)
-            }
-            Err(err) => Err(err),
-        }
+        // Comments have to be masked out of the whole file before the pattern
+        // sees it, so this is the one path that reads rather than streams.
+        let content = read_source(path)?;
+        searcher.search_slice(matcher, comment_source(&content).as_bytes(), &mut sink)
     } else {
         searcher.search_path(matcher, path, &mut sink)
     };

@@ -2,6 +2,9 @@
 name = "rkgrep"
 version = "0.1.0"
 edition = "2021"
+# Set by `ignore` and `globset`, not by anything rkgrep itself writes. CI holds
+# it to this.
+rust-version = "1.88"
 description = "Ranked, span-scoped, budget-packed code search for a context window"
 license = "MIT"
 repository = "https://github.com/CoderDayton/rkgrep"

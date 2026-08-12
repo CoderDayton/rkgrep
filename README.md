@@ -97,7 +97,7 @@ rkgrep PATTERN [PATH]
 | `--hidden`, `--no-ignore` | search hidden files; ignore `.gitignore` |
 | `-l, --anchors-only` | anchors without source text |
 | `-n, --line-numbers` | number the lines, marking the ones that matched |
-| `--fetch ANCHOR` | return the lines an anchor names; `-` reads stdin |
+| `--fetch ANCHOR` | return the lines an anchor names, from under the root; `-` reads stdin |
 | `--vimgrep` | one line per matched line as `path:line:col:text`, every match |
 | `--json` | machine-readable output |
 | `--stats` | spans, tokens, and per-phase timings, to stderr |
