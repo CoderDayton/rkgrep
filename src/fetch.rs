@@ -5,7 +5,7 @@
 //! a couple of hundred tokens, then spend the budget only on that.
 
 use std::io::{BufRead, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -61,8 +61,17 @@ fn anchors(given: &[String]) -> Result<Vec<Anchor>> {
 ///
 /// Anchors are read from stdin as often as they are typed, so where they point
 /// is not the caller's own choosing. A path that resolves outside the tree
-/// being searched is refused rather than read.
+/// being searched is refused rather than read. An anchor carrying its own root
+/// or drive is refused before the filesystem is touched, because joining it
+/// discards `root` entirely.
 fn resolve(root: &Path, path: &str) -> Result<PathBuf> {
+    let given = Path::new(path);
+    if matches!(
+        given.components().next(),
+        Some(Component::Prefix(_) | Component::RootDir)
+    ) {
+        bail!("{path} is outside {}", root.display());
+    }
     let full = root.join(path);
     let resolved = full
         .canonicalize()
