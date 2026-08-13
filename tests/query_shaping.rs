@@ -427,20 +427,38 @@ fn a_malformed_anchor_is_reported_not_ignored() {
     assert!(err.contains("not an anchor"), "{err:?}");
 }
 
+/// The `path:line:column:text` fields of one `--vimgrep` line.
+///
+/// A Windows path opens with a drive letter, so the first colon of the line is
+/// part of the path rather than a field separator.
+fn vimgrep_fields(line: &str) -> (&str, u64, u64, &str) {
+    let bytes = line.as_bytes();
+    let drive = if bytes.get(1) == Some(&b':') && bytes[0].is_ascii_alphabetic() {
+        2
+    } else {
+        0
+    };
+    let parts: Vec<&str> = line[drive..].splitn(4, ':').collect();
+    assert_eq!(parts.len(), 4, "{line:?}");
+    (
+        &line[..drive + parts[0].len()],
+        parts[1].parse().expect("a line number"),
+        parts[2].parse().expect("a column"),
+        parts[3],
+    )
+}
+
 #[test]
 fn vimgrep_prints_one_jumpable_line_per_matched_line() {
     let dir = tree();
     let out = stdout(dir.path(), &["--vimgrep", "-w", "validate_token"]);
     assert!(!out.is_empty());
     for line in out.lines() {
-        let parts: Vec<&str> = line.splitn(4, ':').collect();
-        assert_eq!(parts.len(), 4, "{line:?}");
-        let line_number: u64 = parts[1].parse().expect("a line number");
-        let column: u64 = parts[2].parse().expect("a column");
+        let (_, line_number, column, text) = vimgrep_fields(line);
         assert!(line_number >= 1 && column >= 1, "{line:?}");
         // The column points at the match, not at the start of the line.
         assert!(
-            parts[3][(column as usize - 1)..].starts_with("validate_token"),
+            text[(column as usize - 1)..].starts_with("validate_token"),
             "{line:?}"
         );
     }
@@ -471,7 +489,7 @@ fn vimgrep_paths_carry_the_directory_searched() {
     let out = stdout(dir.path(), &["--vimgrep", "-w", "validate_token"]);
     assert!(!out.is_empty());
     for line in out.lines() {
-        let path = line.split(':').next().expect("a path");
+        let (path, ..) = vimgrep_fields(line);
         assert!(Path::new(path).is_file(), "{line:?}");
     }
 }
@@ -483,8 +501,8 @@ fn vimgrep_orders_by_path_then_line() {
     let places: Vec<(&str, u64)> = out
         .lines()
         .map(|line| {
-            let parts: Vec<&str> = line.splitn(4, ':').collect();
-            (parts[0], parts[1].parse().expect("a line number"))
+            let (path, number, ..) = vimgrep_fields(line);
+            (path, number)
         })
         .collect();
     let mut ascending = places.clone();
