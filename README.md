@@ -71,7 +71,7 @@ Docs: [CLI](docs/cli.md) · [Architecture](docs/architecture.md) ·
 ## Usage
 
 ```console
-cargo install --path .
+cargo install --git https://github.com/CoderDayton/rkgrep rkgrep
 ```
 
 Then:
