@@ -5,16 +5,18 @@
 //! files are never returned, so everything that costs per file is deferred to
 //! the candidates that survive ranking.
 
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 
-use crate::spans::{comment_source, declaration_name, read_source};
+use crate::spans::{declaration_name, open_source, Masker, Mode};
 
 use super::region::declares_query;
 use super::Options;
@@ -110,6 +112,36 @@ fn scout_searcher() -> Searcher {
         .build()
 }
 
+/// Match count and declaration hint from the comments of one file.
+///
+/// Comments have to be masked before the pattern sees them, which the engine
+/// cannot do for us. Masking carries from one line to the next, so the file
+/// still streams: this reads a line at a time and holds none of them.
+fn scout_comments(matcher: &RegexMatcher, path: &Path) -> Option<(usize, bool)> {
+    let reader = open_source(path)?;
+    let mut masker = Masker::default();
+    let mut comments = String::new();
+    let mut matches = 0usize;
+    let mut declaration_hint = false;
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        masker.scan_line(&line);
+        masker.render(&line, Mode::Comments, &mut comments);
+        if !matcher.is_match(comments.as_bytes()).unwrap_or(false) {
+            continue;
+        }
+        if !declaration_hint && matches < HINT_SCAN_LINES {
+            declaration_hint = declares_query(matcher, declaration_name(&comments));
+        }
+        matches += 1;
+        if matches >= MAX_MATCH_LINES_PER_FILE {
+            break;
+        }
+    }
+    (matches > 0).then_some((matches, declaration_hint))
+}
+
 /// Match count and declaration hint for one file, or `None` if it is not a
 /// file, could not be read, or did not match.
 fn scout_file(
@@ -118,20 +150,15 @@ fn scout_file(
     path: &Path,
     comments_only: bool,
 ) -> Option<(usize, bool)> {
+    if comments_only {
+        return scout_comments(matcher, path);
+    }
     let mut sink = ScoutSink {
         matcher,
         matches: 0,
         declaration_hint: false,
     };
-    let searched = if comments_only {
-        // Comments have to be masked out of the whole file before the pattern
-        // sees it, so this is the one path that reads rather than streams.
-        let content = read_source(path)?;
-        searcher.search_slice(matcher, comment_source(&content).as_bytes(), &mut sink)
-    } else {
-        searcher.search_path(matcher, path, &mut sink)
-    };
-    match searched.is_err() || sink.matches == 0 {
+    match searcher.search_path(matcher, path, &mut sink).is_err() || sink.matches == 0 {
         true => None,
         false => Some((sink.matches, sink.declaration_hint)),
     }

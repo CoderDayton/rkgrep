@@ -95,10 +95,10 @@ It is a filter, not a different unit. A hit still expands to the declaration
 the comment sits in, so a `TODO` comes back with the code it is about.
 
 The walk pays for it: comments have to be cut out before the pattern sees the
-file, so the scout reads each file rather than searching it by path, and its
-match counts then rank files by their comment matches alone. The declaration
-hint is always false, because a file masked down to its comments declares
-nothing.
+file, which the engine cannot do for us, so the scout masks and matches a line
+at a time instead of searching the file by path. Its match counts then rank
+files by their comment matches alone. The declaration hint is always false,
+because a file masked down to its comments declares nothing.
 
 ## The candidate cut
 
@@ -185,8 +185,8 @@ lines while showing the reader the same code under two anchors.
 `-e` is repeatable and every pattern shares one budget. The tree is still walked
 once: the patterns are joined into one alternation for the scout, which only has
 to decide which files are worth opening. Telling them apart is deferred to
-extraction, where the file has already been read and parsed, so each pattern
-costs one more matcher pass over text already in memory.
+extraction, where every pattern is tried against each line as it is read, so a
+second pattern costs one more matcher call per line and no more reading.
 
 Ranking is per pattern from there. Each keeps its own terms, so `claims.rs`
 scores high for `Claims` and not for `refresh`; candidate ordering uses the best
@@ -231,11 +231,11 @@ declaration it had rather than emptying itself chasing the floor.
 | `src/search/pack.rs` | round-robin across patterns, then the token budget |
 | `src/pathset.rs` | `--files-from` and `--since`, as one list of paths |
 | `src/fetch.rs` | returning spans by anchor, with no search |
-| `src/spans/mod.rs` | `Declaration`, the whole-file table, and `enclosing` |
+| `src/spans/mod.rs` | `Declaration`, opening a source file, and `enclosing` |
 | `src/spans/words.rs` | the keyword tables and byte sets the rules use |
-| `src/spans/mask.rs` | comments and literals blanked out, offsets preserved |
+| `src/spans/mask.rs` | comments and literals blanked out, a line at a time |
 | `src/spans/scan.rs` | the four declaration shapes, one line at a time |
-| `src/spans/body.rs` | where the body a declaration opens ends |
+| `src/spans/body.rs` | where a body ends, and the table built as a file streams |
 | `src/tokenizer/` | `o200k_base` token counting against a compile-time table |
 | `build.rs` | lays that table out, so startup maps it instead of building it |
 | `src/render.rs` | text and JSON output |

@@ -26,11 +26,13 @@ mod mask;
 mod scan;
 mod words;
 
-pub use mask::{comment_source, mask_source};
-pub use scan::{declaration_name, kind_declares, scan_declaration};
+pub use body::DeclBuilder;
+pub use mask::{Masker, Mode};
+pub use scan::{declaration_name, kind_declares};
 pub use words::identifier_tokens;
 
-use body::{body_ends, indent_of};
+#[cfg(test)]
+pub use mask::{comment_source, lines_with_endings, mask_source};
 
 /// Above this, ripgrep is welcome to the file but we will not build a
 /// declaration table for it.
@@ -50,18 +52,19 @@ pub fn oversized_files() -> usize {
     OVERSIZED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A file's text, or `None` when it is larger than [`MAX_SOURCE_BYTES`] or is
-/// not text at all.
+/// A reader over `path`, or `None` when it is larger than
+/// [`MAX_SOURCE_BYTES`].
 ///
-/// The size is settled from the directory entry, before a byte is read. A file
-/// too large to extract from is one that should not be held in memory either,
-/// and a whole tree's worth of workers read at once.
-pub fn read_source(path: &std::path::Path) -> Option<String> {
+/// The size is settled from the directory entry, before a byte is read. What a
+/// caller then does line by line it never has to hold whole, which is the
+/// point: one worker per core reads at once, and the largest file in a batch
+/// would otherwise set the memory a query costs.
+pub fn open_source(path: &std::path::Path) -> Option<std::io::BufReader<std::fs::File>> {
     if std::fs::metadata(path).ok()?.len() > MAX_SOURCE_BYTES as u64 {
         OVERSIZED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    Some(std::io::BufReader::new(std::fs::File::open(path).ok()?))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,56 +84,24 @@ pub struct Declaration {
 }
 
 /// Every declaration in `content`, in file order.
+///
+/// A query streams a file through [`DeclBuilder`] instead. This is the same
+/// table stated over a whole string, which is what a test can be written
+/// against.
+#[cfg(test)]
 pub fn declarations(content: &str) -> Vec<Declaration> {
     if content.len() > MAX_SOURCE_BYTES {
         return Vec::new();
     }
-    let masked = mask_source(content);
-    let lines: Vec<&str> = masked.lines().collect();
-    let mut hits: Vec<(u64, String, String, usize)> = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if let Some((kind, name)) = scan_declaration(line) {
-            let indent = indent_of(line).unwrap_or(0);
-            hits.push((
-                (index + 1) as u64,
-                kind.to_string(),
-                name.to_string(),
-                indent,
-            ));
-        }
+    let mut masker = Masker::default();
+    let mut builder = DeclBuilder::default();
+    let mut masked = String::new();
+    for (number, (line, _)) in lines_with_endings(content).enumerate() {
+        masker.scan_line(line);
+        masker.render(line, Mode::Code, &mut masked);
+        builder.line(number as u64 + 1, &masked);
     }
-
-    let ends = body_ends(&lines);
-    let mut open: Vec<usize> = Vec::new();
-    let mut out = Vec::with_capacity(hits.len());
-    for (i, (start_line, kind, name, indent)) in hits.iter().enumerate() {
-        // A declaration ends at its body, and one whose body is made of other
-        // declarations ends before the first of them: the methods of a class
-        // are spans in their own right, so returning the class whole returns
-        // them a second time and spends a whole budget on one file. Hits are
-        // in file order, so the next one is that first nested declaration
-        // whenever the body reaches it, and a sibling the body already stops
-        // above.
-        let body = ends[*start_line as usize - 1];
-        let end_line = match hits.get(i + 1) {
-            Some((next, _, _, _)) => body.min(next.saturating_sub(1)),
-            None => body,
-        }
-        .max(*start_line);
-
-        while open.last().is_some_and(|top| *top >= *indent) {
-            open.pop();
-        }
-        out.push(Declaration {
-            name: name.clone(),
-            kind: kind.clone(),
-            start_line: *start_line,
-            end_line,
-            depth: open.len(),
-        });
-        open.push(*indent);
-    }
-    out
+    builder.finish()
 }
 
 /// Declaration containing `line`, or `None` for code inside none of them.

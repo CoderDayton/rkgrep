@@ -5,22 +5,20 @@
 //! more material than it can return. Within a pass the files are independent,
 //! so a batch is spread across one worker per core.
 
-use std::borrow::Cow;
 use std::cell::OnceCell;
+use std::io::BufRead;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use grep_matcher::Matcher;
-use grep_regex::RegexMatcher;
-use grep_searcher::sinks::UTF8;
-use grep_searcher::{Searcher, SearcherBuilder};
 
-use crate::spans::{comment_source, declarations, read_source};
+use crate::spans::{open_source, DeclBuilder, Declaration, Masker, Mode};
 use crate::tokenizer::count_capped;
 
 use super::query::{Queries, Query};
 use super::rank::{better_candidate, span_score, Candidate};
-use super::region::regions_for;
+use super::region::{regions_for, Region};
 use super::walk::MAX_MATCH_LINES_PER_FILE;
 use super::{Hit, Options, Timings};
 
@@ -40,46 +38,15 @@ const MIN_CANDIDATE_FILES: usize = 8;
 /// Candidates ordered per pass.
 const CANDIDATE_CHUNK: usize = 256;
 
-/// What a pattern is matched against: the file itself, or only its comments.
-fn haystack(content: &str, comments_only: bool) -> Cow<'_, str> {
-    match comments_only {
-        true => Cow::Owned(comment_source(content)),
-        false => Cow::Borrowed(content),
-    }
-}
-
-/// Matched line numbers for one candidate file, resolved late.
-pub(super) fn matched_lines(
-    searcher: &mut Searcher,
-    matcher: &RegexMatcher,
-    content: &str,
-    limit: usize,
-) -> Vec<u64> {
-    let mut lines = Vec::new();
-    let sink = UTF8(|line_number, _| {
-        lines.push(line_number);
-        Ok(lines.len() < limit)
-    });
-    let _ = searcher.search_slice(matcher, content.as_bytes(), sink);
-    lines
-}
-
-/// The 1-based byte column of the first match on each of `lines`.
-fn match_columns(queries: &[Query], searched: &[&str], lines: &[u64]) -> Vec<u64> {
-    lines
+/// The 1-based byte column of the first match on one line, whichever pattern
+/// found it first.
+fn first_column(queries: &[Query], text: &str) -> u64 {
+    queries
         .iter()
-        .map(|line| {
-            let Some(text) = searched.get((*line as usize).saturating_sub(1)) else {
-                return 1;
-            };
-            queries
-                .iter()
-                .filter_map(|query| query.matcher.find_at(text.as_bytes(), 0).ok().flatten())
-                .map(|found| found.start() as u64 + 1)
-                .min()
-                .unwrap_or(1)
-        })
-        .collect()
+        .filter_map(|query| query.matcher.find_at(text.as_bytes(), 0).ok().flatten())
+        .map(|found| found.start() as u64 + 1)
+        .min()
+        .unwrap_or(1)
 }
 
 /// What turning a candidate into spans needs, beyond the candidate itself.
@@ -118,52 +85,154 @@ impl Extraction {
     }
 }
 
+/// What one streaming read of a candidate file yields.
+struct Scanned {
+    decls: Vec<Declaration>,
+    /// Matched lines paired with the pattern that found them.
+    matched: Vec<(u64, usize)>,
+    /// The first match column of each matched line, in line order, and empty
+    /// unless columns were asked for.
+    columns: Vec<(u64, u64)>,
+    total_lines: u64,
+}
+
+/// Read one candidate, masking, extracting and matching in the same pass.
+///
+/// Nothing the size of the file survives the call: the declaration table is
+/// one entry per declaration and the matches are one per matched line, so a
+/// megabyte of bundled output costs what it yields rather than what it is.
+fn scan_file(path: &Path, queries: &[Query], ex: &Extraction) -> Option<Scanned> {
+    let reader = open_source(path)?;
+    let mut masker = Masker::default();
+    let mut builder = DeclBuilder::default();
+    let mut masked = String::new();
+    let mut comments = String::new();
+
+    let mut matched: Vec<(u64, usize)> = Vec::new();
+    let mut columns: Vec<(u64, u64)> = Vec::new();
+    let mut found = vec![0usize; queries.len()];
+    let mut capped = 0usize;
+    let mut total_lines = 0u64;
+
+    for line in reader.lines() {
+        // A file that is not text at all is passed over whole, as it was
+        // before a byte of it was read.
+        let line = line.ok()?;
+        total_lines += 1;
+        masker.scan_line(&line);
+        masker.render(&line, Mode::Code, &mut masked);
+        builder.line(total_lines, &masked);
+
+        // Every pattern has all the lines it will record, but the file is read
+        // to its end regardless: a declaration below here still ends somewhere,
+        // and a region is clamped against the line count.
+        if capped == queries.len() {
+            continue;
+        }
+        let searched = match ex.comments_only {
+            true => {
+                masker.render(&line, Mode::Comments, &mut comments);
+                comments.as_str()
+            }
+            false => line.as_str(),
+        };
+
+        let mut any = false;
+        for (index, query) in queries.iter().enumerate() {
+            if found[index] >= ex.max_match_lines {
+                continue;
+            }
+            if query.matcher.is_match(searched.as_bytes()).unwrap_or(false) {
+                matched.push((total_lines, index));
+                found[index] += 1;
+                capped += usize::from(found[index] == ex.max_match_lines);
+                any = true;
+            }
+        }
+        if any && ex.columns {
+            columns.push((total_lines, first_column(queries, searched)));
+        }
+    }
+
+    Some(Scanned {
+        decls: builder.finish(),
+        matched,
+        columns,
+        total_lines,
+    })
+}
+
+/// The text of each region, read in one pass over the file.
+///
+/// Regions arrive sorted and non-overlapping, so one cursor walks them
+/// alongside the file and only the lines they name are kept.
+fn region_texts(path: &Path, regions: &[Region]) -> Option<Vec<Option<String>>> {
+    let mut texts: Vec<Option<String>> = vec![None; regions.len()];
+    let reader = open_source(path)?;
+    let mut at = 0usize;
+    let mut number = 0u64;
+    for line in reader.lines() {
+        let line = line.ok()?;
+        number += 1;
+        while regions.get(at).is_some_and(|region| region.end < number) {
+            at += 1;
+        }
+        let Some(region) = regions.get(at) else {
+            break;
+        };
+        if number < region.start {
+            continue;
+        }
+        let text = texts[at].get_or_insert_with(String::new);
+        if number > region.start {
+            text.push('\n');
+        }
+        text.push_str(&line);
+    }
+    Some(texts)
+}
+
+/// The column recorded for each of `lines`, or 1 where none was.
+fn columns_for(recorded: &[(u64, u64)], lines: &[u64]) -> Vec<u64> {
+    lines
+        .iter()
+        .map(|line| {
+            recorded
+                .binary_search_by_key(line, |(at, _)| *at)
+                .map_or(1, |at| recorded[at].1)
+        })
+        .collect()
+}
+
 /// Every span one candidate file contributes.
 fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> Vec<Hit> {
     let file = &candidate.file;
-    let Some(content) = read_source(&file.absolute) else {
+    let Some(scanned) = scan_file(&file.absolute, queries, ex) else {
         return Vec::new();
     };
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
-        return Vec::new();
-    }
-    let total_lines = lines.len() as u64;
-    let decls = declarations(&content);
-    let mut searcher = SearcherBuilder::new().line_number(true).build();
-    let searched = haystack(&content, ex.comments_only);
-
-    let mut matched: Vec<(u64, usize)> = Vec::new();
-    for (index, query) in queries.iter().enumerate() {
-        let found = matched_lines(&mut searcher, &query.matcher, &searched, ex.max_match_lines);
-        matched.extend(found.into_iter().map(|line| (line, index)));
-    }
-    if matched.is_empty() {
+    if scanned.matched.is_empty() {
         return Vec::new();
     }
 
-    let searched_lines: Vec<&str> = match ex.columns {
-        true => searched.lines().collect(),
-        false => Vec::new(),
+    let regions = regions_for(
+        &scanned.decls,
+        &scanned.matched,
+        scanned.total_lines,
+        queries,
+        ex.max_declaration_lines,
+    );
+    let Some(texts) = region_texts(&file.absolute, &regions) else {
+        return Vec::new();
     };
 
     let mut hits = Vec::new();
     let mut lowered = String::new();
-    for region in regions_for(
-        &decls,
-        &matched,
-        total_lines,
-        queries,
-        ex.max_declaration_lines,
-    ) {
-        let from = (region.start.saturating_sub(1)) as usize;
-        let to = (region.end as usize).min(lines.len());
-        if from >= to {
+    for (region, text) in regions.into_iter().zip(texts) {
+        let Some(text) = text else {
             continue;
-        }
+        };
         let owner = region.owner();
         let answered = region.answered();
-        let text = lines[from..to].join("\n");
         lowered.clear();
         lowered.extend(text.chars().flat_map(char::to_lowercase));
         let score = span_score(
@@ -173,7 +242,7 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
             candidate.path_scores[owner],
         );
         let columns = match ex.columns {
-            true => match_columns(queries, &searched_lines, &region.matched),
+            true => columns_for(&scanned.columns, &region.matched),
             false => Vec::new(),
         };
         let is_declaration = region.is_declaration();

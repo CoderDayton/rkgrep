@@ -30,6 +30,20 @@ Span extraction is not the cost. `--max-tokens 1` measures the same as a full
 budget, because spans are built only for files that could plausibly be
 returned.
 
+### What a query holds
+
+Files are read a line at a time, so what a query holds is bounded by the longest
+line rather than the largest file. What survives a line is the declaration
+table — one entry per declaration, not per line — the matched line numbers, and
+the spans that will be returned. A minified bundle is the exception: its line is
+the file, and it is still held whole.
+
+An idle process is 13 MB, of which 8.1 MB is the tokenizer laid out in the
+binary. On a tree of three 3 MB JavaScript files, peak resident size is 26 MB
+under a budget and 35 MB under `--no-budget`, where the result set itself is the
+difference. Minified onto one line each, the same three files cost 29 MB either
+way.
+
 ### What the token counter costs
 
 `--max-tokens` is denominated in real `o200k_base` tokens, and a tokenizer
@@ -104,11 +118,10 @@ does.
 
 What is left is the single largest file in a batch. On a JavaScript tree that
 is routinely a megabyte of bundled output, and one file is one worker however
-many cores are available. Closing that means either giving up on huge single
-files — a size cut would change which spans come back — or splitting one file's
-extraction across threads, which is four sequential passes (read, mask, scan,
-search) over one buffer. Neither is obviously worth it while the walk is three
-times larger.
+many cores are available. Reading, masking, extracting and matching are one
+pass over that file, and a second pass collects the lines the surviving regions
+name, so all that is left to close is splitting one file across threads. That
+is not obviously worth it while the walk is three times larger.
 
 ### Without a budget
 
