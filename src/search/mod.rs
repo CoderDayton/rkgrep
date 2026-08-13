@@ -23,6 +23,7 @@
 //! every phase.
 
 mod extract;
+mod filter;
 mod pack;
 mod query;
 mod rank;
@@ -37,6 +38,10 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::tokenizer::count as count_tokens;
+
+pub use filter::{extensions_for, language_names, Tests};
+pub use rank::Reasons;
+pub use region::DEFAULT_ORPHAN_CONTEXT;
 
 #[derive(Debug, Clone)]
 pub struct Hit {
@@ -63,6 +68,8 @@ pub struct Hit {
     /// Filled on demand by [`Hit::tokens`], never at construction.
     pub(in crate::search) tokens: OnceCell<usize>,
     pub score: f64,
+    /// What that score is made of, resolved only when `--why` asks for it.
+    pub reasons: Option<Reasons>,
     pub text: String,
 }
 
@@ -99,6 +106,7 @@ impl Hit {
             answered: Vec::new(),
             tokens: OnceCell::new(),
             score: 0.0,
+            reasons: None,
             text,
         }
     }
@@ -111,7 +119,8 @@ impl Serialize for Hit {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let columns = !self.match_columns.is_empty();
-        let mut hit = serializer.serialize_struct("Hit", 12 + usize::from(columns))?;
+        let fields = 12 + usize::from(columns) + usize::from(self.reasons.is_some());
+        let mut hit = serializer.serialize_struct("Hit", fields)?;
         hit.serialize_field("path", &self.path)?;
         hit.serialize_field("start_line", &self.start_line)?;
         hit.serialize_field("end_line", &self.end_line)?;
@@ -126,6 +135,9 @@ impl Serialize for Hit {
         hit.serialize_field("query", &self.query)?;
         hit.serialize_field("tokens", &self.tokens())?;
         hit.serialize_field("score", &self.score)?;
+        if let Some(reasons) = &self.reasons {
+            hit.serialize_field("why", reasons)?;
+        }
         hit.serialize_field("text", &self.text)?;
         hit.end()
     }
@@ -199,6 +211,15 @@ pub struct Options {
     /// Resolve the column of each match. Costs a matcher call per matched
     /// line, so it is paid for only when `--vimgrep` asks.
     pub columns: bool,
+    /// Keep the score breakdown of every span, for `--why`.
+    pub explain: bool,
+    /// Extensions the walk keeps; empty keeps every file `--glob` allowed.
+    pub extensions: Vec<&'static str>,
+    /// What to do with the test files the walk finds.
+    pub tests: Tests,
+    /// Lines returned either side of a match that no declaration encloses,
+    /// and the window a declaration too large to return is clamped to.
+    pub orphan_context: u64,
     pub literal: bool,
     pub word: bool,
     pub ignore_case: bool,
@@ -219,6 +240,10 @@ impl Default for Options {
             kinds: Vec::new(),
             min_references: 0,
             columns: false,
+            explain: false,
+            extensions: Vec::new(),
+            tests: Tests::default(),
+            orphan_context: DEFAULT_ORPHAN_CONTEXT,
             literal: false,
             word: false,
             ignore_case: false,

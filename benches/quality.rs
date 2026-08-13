@@ -254,7 +254,7 @@ fn run_rkgrep(
         Command::new(binary)
             .arg(regex::escape(name))
             .arg(root)
-            .args(["--json", "-w", "-g", glob, "-t", &max_tokens.to_string()]),
+            .args(["--json", "-w", "-g", glob, "-b", &max_tokens.to_string()]),
     );
     if text.trim().is_empty() {
         return Vec::new();

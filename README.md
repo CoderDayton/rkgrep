@@ -83,13 +83,16 @@ rkgrep PATTERN [PATH]
 | Flag | Meaning |
 | --- | --- |
 | `-e, --regexp PATTERN` | a pattern; repeat to ask about several at once |
-| `-t, --max-tokens N` | budget for the whole result set (default 2000) |
-| `-A, --no-budget` | every ranked span: no budget, no per-file cap |
+| `-b, --max-tokens N` | budget for the whole result set (default 2000) |
+| `-a, --no-budget` | every ranked span: no budget, no per-file cap |
 | `--max-per-file N` | cap spans from any one file (default 3, 0 for no cap) |
 | `-d`, `-r` | only declarations, only references |
 | `--kind fn,class` | only these declaring kinds (implies `-d`) |
 | `--min-references N` | keep budget for at least N non-declaration spans |
+| `-O, --orphan-context N` | lines either side of a match no declaration encloses (default 6) |
 | `-g, --glob GLOB` | restrict to matching files, repeatable |
+| `-t, --lang LANG` | only these languages, e.g. `-t py,rust` |
+| `--no-tests`, `--tests-only` | drop test files, or return nothing else |
 | `--files-from FILE` | search only these paths; `-` reads stdin |
 | `--since REF` | search only what changed since `REF` |
 | `-C, --comments` | match only inside comments, in any language |
@@ -99,6 +102,7 @@ rkgrep PATTERN [PATH]
 | `-n, --line-numbers` | number the lines, marking the ones that matched |
 | `--fetch ANCHOR` | return the lines an anchor names, from under the root; `-` reads stdin |
 | `--vimgrep` | one line per matched line as `path:line:col:text`, every match |
+| `--why` | show what each span's score is made of |
 | `--json` | machine-readable output |
 | `--color auto\|always\|never` | colorize headers and matched lines |
 | `--stats` | spans, tokens, and per-phase timings, to stderr |
@@ -108,7 +112,8 @@ rkgrep PATTERN [PATH]
 rkgrep -w handle_request src/        whole words, under src/
 rkgrep -e Claims -e refresh          two symbols, one budget, answers alternating
 rkgrep -d validate_token             only where it is declared
-rkgrep -t 8000 -g '*.py' Config      bigger budget, Python only
+rkgrep -b 8000 -t py Config          bigger budget, Python only
+rkgrep --no-tests -d parse_url       where it is defined, tests aside
 rkgrep --since main -C TODO          comments in what this branch changed
 rkgrep -l TODO | rkgrep --fetch -    survey cheaply, then read what matters
 rkgrep --vimgrep parse_url           one jumpable line per matching line

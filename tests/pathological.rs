@@ -62,7 +62,7 @@ fn a_file_that_is_one_long_line_does_not_stall() {
     let dir = tree_with("long.py", body.as_bytes());
 
     let started = Instant::now();
-    let (out, _, code) = run(dir.path(), &["-A", "needle"], None);
+    let (out, _, code) = run(dir.path(), &["-a", "needle"], None);
     let took = started.elapsed();
 
     assert_eq!(code, 0, "{out:?}");
@@ -159,7 +159,7 @@ fn a_file_over_the_size_cap_is_skipped_and_said_so() {
     );
     let dir = tree_with("huge.py", body.as_bytes());
 
-    let (out, err, _) = run(dir.path(), &["-A", "needle"], None);
+    let (out, err, _) = run(dir.path(), &["-a", "needle"], None);
     assert!(out.is_empty(), "{out:?}");
     assert!(err.contains("skipped 1 files over 8 MiB"), "{err:?}");
 }
@@ -204,12 +204,12 @@ fn hostile_bytes_do_not_crash() {
 
     for args in [
         vec!["needle"],
-        vec!["-A", "needle"],
-        vec!["-n", "-A", "needle"],
-        vec!["--json", "-A", "needle"],
+        vec!["-a", "needle"],
+        vec!["-n", "-a", "needle"],
+        vec!["--json", "-a", "needle"],
         vec!["--vimgrep", "needle"],
-        vec!["-C", "-A", "needle"],
-        vec!["-d", "-A", "needle"],
+        vec!["-C", "-a", "needle"],
+        vec!["-d", "-a", "needle"],
         vec!["-l", "needle"],
     ] {
         let (_, err, code) = run(dir.path(), &args, None);

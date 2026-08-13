@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::spans::identifier_tokens;
 
 use super::query::Query;
@@ -82,15 +84,43 @@ fn term_overlap(lowered: &str, terms: &[String]) -> f64 {
     present as f64 / terms.len() as f64
 }
 
+/// What a span's score is made of, which is what `--why` prints.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct Reasons {
+    /// How many of the span's lines matched.
+    pub matches: f64,
+    /// How much of the pattern the span's own text carries.
+    pub terms: f64,
+    /// How much the file's name looks like the pattern.
+    pub path: f64,
+    /// Charged against a declaration a shallower one of the same name shadows,
+    /// and so resolved only once every span is known.
+    pub depth_penalty: f64,
+}
+
+impl Reasons {
+    pub fn total(&self) -> f64 {
+        self.matches + self.terms + self.path - self.depth_penalty
+    }
+}
+
 /// What one span scores before the declaration bonus and the depth penalty.
 ///
 /// `lowered` is the span's own text, lowercased. The caller owns that buffer
 /// and reuses it, because a file of two hundred spans should not allocate two
 /// hundred copies of itself to be scored.
-pub(super) fn span_score(lowered: &str, terms: &[String], matches: usize, path_score: f64) -> f64 {
-    W_MATCHES * ((matches + 1) as f64).ln()
-        + W_TERMS * term_overlap(lowered, terms)
-        + W_PATH * path_score
+pub(super) fn span_score(
+    lowered: &str,
+    terms: &[String],
+    matches: usize,
+    path_score: f64,
+) -> Reasons {
+    Reasons {
+        matches: W_MATCHES * ((matches + 1) as f64).ln(),
+        terms: W_TERMS * term_overlap(lowered, terms),
+        path: W_PATH * path_score,
+        depth_penalty: 0.0,
+    }
 }
 
 /// A matching file with its ranking signals resolved.
@@ -174,5 +204,8 @@ pub(super) fn penalize_shadowed_declarations(hits: &mut [Hit]) {
 
     for (hit, penalty) in hits.iter_mut().zip(penalties) {
         hit.score -= penalty;
+        if let Some(reasons) = &mut hit.reasons {
+            reasons.depth_penalty = penalty;
+        }
     }
 }

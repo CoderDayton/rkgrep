@@ -46,6 +46,9 @@ The walk deliberately learns as little as possible. Its sink records a match
 count and one boolean — whether any matched line declares the query on its own
 — and holds neither the file's text nor its matched line numbers.
 
+`--lang` and `--no-tests` are settled before the sink runs at all: both are
+answered from the path, so a narrowed query never opens the files it excludes.
+
 The boolean tests the declared *name* against the pattern, the same rule
 applied once the file is read. In `const a = store.createProject(...)` the
 match sits on a declaration's first line, but the declaration is `a` — a local
@@ -140,6 +143,9 @@ Query terms are recovered by stripping regex metacharacters and splitting what
 is left the way an identifier splits, so a search for `validateToken` still
 ranks a `validate_token` span.
 
+`--why` prints the four parts a span's score is made of, so an order that looks
+wrong can be read off rather than reasoned about.
+
 The final sort puts **declarations first, unconditionally**, then score, then
 path and start line. Letting a file that mentions X twenty times outrank the
 one that defines it is how a ranker loses to a one-line grep.
@@ -225,6 +231,7 @@ declaration it had rather than emptying itself chasing the floor.
 | `src/search/mod.rs` | the pipeline end to end, plus `Hit`, `Options`, timings |
 | `src/search/query.rs` | one matcher per pattern, and one for the walk |
 | `src/search/walk.rs` | the parallel pass over the tree and its scout sink |
+| `src/search/filter.rs` | the language and test tables, applied to a path |
 | `src/search/region.rs` | matched lines to declaration-scoped regions, merged |
 | `src/search/extract.rs` | reading candidates best-first, spans in parallel |
 | `src/search/rank.rs` | the weights, and every ordering decision |

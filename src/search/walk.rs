@@ -18,6 +18,7 @@ use ignore::WalkBuilder;
 
 use crate::spans::{declaration_name, open_source, Masker, Mode};
 
+use super::filter::Filter;
 use super::region::declares_query;
 use super::Options;
 
@@ -176,6 +177,9 @@ pub(super) fn collect_matches(
     let (tx, rx) = mpsc::channel::<FileMatches>();
     let root = root.to_path_buf();
     let comments_only = opts.comments_only;
+    // Language and test narrowing are answered from the path, so they are
+    // settled before a worker opens anything.
+    let filter = Filter::for_run(opts);
 
     builder.build_parallel().run(|| {
         let tx = tx.clone();
@@ -188,12 +192,16 @@ pub(super) fn collect_matches(
         // pool.
         let matcher = matcher.clone();
         let mut searcher = scout_searcher();
+        let filter = &filter;
 
         Box::new(move |entry| {
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
             };
             if !entry.file_type().is_some_and(|t| t.is_file()) {
+                return ignore::WalkState::Continue;
+            }
+            if !filter.keeps(entry.path(), || relative_path(&root, entry.path())) {
                 return ignore::WalkState::Continue;
             }
             let Some((match_count, declaration_hint)) =

@@ -68,7 +68,7 @@ fn json_hits(root: &Path, args: &[&str]) -> serde_json::Value {
 #[test]
 fn declarations_rank_above_references() {
     let dir = tree();
-    let hits = json_hits(dir.path(), &["validate_token", "-w", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["validate_token", "-w", "-b", "1000"]);
     let first = &hits[0];
     assert_eq!(first["is_declaration"], true, "hits: {hits}");
     assert_eq!(first["symbol"], "validate_token");
@@ -77,7 +77,7 @@ fn declarations_rank_above_references() {
 #[test]
 fn a_match_expands_to_its_enclosing_declaration() {
     let dir = tree();
-    let hits = json_hits(dir.path(), &["validate_token", "-w", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["validate_token", "-w", "-b", "1000"]);
     let api = hits
         .as_array()
         .expect("array")
@@ -96,7 +96,7 @@ fn overlapping_regions_merge() {
     // api.py matches on its import line and inside handler(); the orphan
     // window around the import overlaps the function's span.
     let dir = tree();
-    let hits = json_hits(dir.path(), &["validate_token", "-w", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["validate_token", "-w", "-b", "1000"]);
     let from_api: Vec<_> = hits
         .as_array()
         .expect("array")
@@ -112,7 +112,7 @@ fn overlapping_regions_merge() {
 #[test]
 fn docstring_mentions_never_become_declarations() {
     let dir = tree();
-    let hits = json_hits(dir.path(), &["decoy", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["decoy", "-b", "1000"]);
     for hit in hits.as_array().expect("array") {
         assert_eq!(hit["is_declaration"], false, "{hit}");
     }
@@ -121,7 +121,7 @@ fn docstring_mentions_never_become_declarations() {
 #[test]
 fn budget_is_respected() {
     let dir = tree();
-    let hits = json_hits(dir.path(), &["validate_token", "-w", "-t", "12"]);
+    let hits = json_hits(dir.path(), &["validate_token", "-w", "-b", "12"]);
     let total: u64 = hits
         .as_array()
         .expect("array")
@@ -134,7 +134,7 @@ fn budget_is_respected() {
 #[test]
 fn max_per_file_limits_crowding() {
     let dir = tree();
-    let hits = json_hits(dir.path(), &["def", "-t", "4000", "--max-per-file", "1"]);
+    let hits = json_hits(dir.path(), &["def", "-b", "4000", "--max-per-file", "1"]);
     let mut paths: Vec<&str> = hits
         .as_array()
         .expect("array")
@@ -150,7 +150,7 @@ fn max_per_file_limits_crowding() {
 #[test]
 fn anchors_point_at_real_lines() {
     let dir = tree();
-    let hits = json_hits(dir.path(), &["validate_token", "-w", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["validate_token", "-w", "-b", "1000"]);
     for hit in hits.as_array().expect("array") {
         let path = dir.path().join(hit["path"].as_str().expect("path"));
         let content = fs::read_to_string(&path).expect("readable");
@@ -171,7 +171,7 @@ fn anchors_point_at_real_lines() {
 fn globs_restrict_the_search() {
     let dir = tree();
     fs::write(dir.path().join("notes.txt"), "validate_token\n").expect("write");
-    let hits = json_hits(dir.path(), &["validate_token", "-g", "*.txt", "-t", "500"]);
+    let hits = json_hits(dir.path(), &["validate_token", "-g", "*.txt", "-b", "500"]);
     let paths: Vec<&str> = hits
         .as_array()
         .expect("array")
@@ -191,7 +191,7 @@ fn comments_scope_matches_to_comments() {
     )
     .expect("write");
 
-    let hits = json_hits(dir.path(), &["stale", "--comments", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["stale", "--comments", "-b", "1000"]);
     assert_eq!(hits.as_array().map(Vec::len), Some(1), "hits: {hits}");
     // Filter only: the span is still the declaration the comment sits in.
     assert_eq!(hits[0]["symbol"], "evict");
@@ -248,7 +248,7 @@ fn a_missing_path_is_reported() {
 fn literal_mode_disables_regex_syntax() {
     let dir = tree();
     fs::write(dir.path().join("lit.py"), "x = a.b(c)\n").expect("write");
-    let hits = json_hits(dir.path(), &["a.b(c)", "-F", "-g", "lit.py", "-t", "500"]);
+    let hits = json_hits(dir.path(), &["a.b(c)", "-F", "-g", "lit.py", "-b", "500"]);
     assert_eq!(hits.as_array().expect("array").len(), 1, "{hits}");
 }
 
@@ -275,7 +275,7 @@ fn a_binding_that_calls_the_symbol_does_not_rank_as_its_declaration() {
     )
     .expect("write");
 
-    let hits = json_hits(dir.path(), &["createProject", "-w", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["createProject", "-w", "-b", "1000"]);
     let first = &hits[0];
     assert_eq!(first["symbol"], "createProject", "hits: {hits}");
     assert_eq!(first["is_declaration"], true, "hits: {hits}");
@@ -304,7 +304,7 @@ fn a_longer_name_containing_the_pattern_is_not_its_declaration() {
     )
     .expect("write");
 
-    let hits = json_hits(dir.path(), &["createProject", "-w", "-t", "1000"]);
+    let hits = json_hits(dir.path(), &["createProject", "-w", "-b", "1000"]);
     let declaring: Vec<&str> = hits
         .as_array()
         .map(|hits| {
@@ -322,7 +322,7 @@ fn a_longer_name_containing_the_pattern_is_not_its_declaration() {
 #[test]
 fn no_budget_returns_more_than_a_tight_budget() {
     let dir = tree();
-    let tight = json_hits(dir.path(), &["def", "-t", "40"]);
+    let tight = json_hits(dir.path(), &["def", "-b", "40"]);
     let all = json_hits(dir.path(), &["def", "--no-budget"]);
 
     let tokens = |hits: &serde_json::Value| -> u64 {
@@ -453,11 +453,11 @@ fn repeated_runs_return_identical_results() {
         )
         .expect("write");
     }
-    let first = json_hits(dir.path(), &["validate_token", "-t", "300"]);
+    let first = json_hits(dir.path(), &["validate_token", "-b", "300"]);
     assert!(!first.as_array().expect("array").is_empty(), "{first}");
     for _ in 0..4 {
         assert_eq!(
-            json_hits(dir.path(), &["validate_token", "-t", "300"]),
+            json_hits(dir.path(), &["validate_token", "-b", "300"]),
             first
         );
     }

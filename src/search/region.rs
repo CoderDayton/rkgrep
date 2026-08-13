@@ -13,10 +13,10 @@ use crate::spans::{enclosing, kind_declares, Declaration};
 
 use super::query::Query;
 
-/// Window for matches outside any declaration: imports, top-level constants,
-/// configuration literals. Also what a declaration too large to return is
-/// clamped to.
-pub const ORPHAN_CONTEXT: u64 = 6;
+/// Lines either side of a match that no declaration encloses: imports,
+/// top-level constants, configuration literals. Also what a declaration too
+/// large to return is clamped to. `--orphan-context` overrides it.
+pub const DEFAULT_ORPHAN_CONTEXT: u64 = 6;
 
 /// A region of one file that will become a [`super::Hit`], before scoring.
 pub(super) struct Region {
@@ -107,6 +107,7 @@ fn window_for(
     line: u64,
     total_lines: u64,
     max_declaration_lines: u64,
+    orphan_context: u64,
 ) -> (u64, u64, Option<String>, Option<String>, usize) {
     match enclosing(decls, line) {
         Some(d) if d.end_line - d.start_line < max_declaration_lines => (
@@ -119,16 +120,18 @@ fn window_for(
         Some(d) => {
             let names = line == d.start_line;
             (
-                line.saturating_sub(ORPHAN_CONTEXT).max(d.start_line),
-                (line + ORPHAN_CONTEXT).min(d.end_line).min(total_lines),
+                line.saturating_sub(orphan_context).max(d.start_line),
+                line.saturating_add(orphan_context)
+                    .min(d.end_line)
+                    .min(total_lines),
                 names.then(|| d.name.clone()),
                 names.then(|| d.kind.clone()),
                 if names { d.depth } else { 0 },
             )
         }
         None => (
-            line.saturating_sub(ORPHAN_CONTEXT).max(1),
-            (line + ORPHAN_CONTEXT).min(total_lines),
+            line.saturating_sub(orphan_context).max(1),
+            line.saturating_add(orphan_context).min(total_lines),
             None,
             None,
             0,
@@ -144,6 +147,7 @@ pub(super) fn regions_for(
     total_lines: u64,
     queries: &[Query],
     max_declaration_lines: u64,
+    orphan_context: u64,
 ) -> Vec<Region> {
     let mut sorted = lines.to_vec();
     sorted.sort_unstable();
@@ -155,8 +159,13 @@ pub(super) fn regions_for(
     // one by scanning them all is quadratic in that count.
     let mut seen: HashMap<(u64, u64, bool), usize> = HashMap::new();
     for (line, query) in sorted {
-        let (start, end, symbol, kind, depth) =
-            window_for(decls, line, total_lines, max_declaration_lines);
+        let (start, end, symbol, kind, depth) = window_for(
+            decls,
+            line,
+            total_lines,
+            max_declaration_lines,
+            orphan_context,
+        );
         let declares = start == line
             && kind.as_deref().is_some_and(kind_declares)
             && declares_query(&queries[query].matcher, symbol.as_deref());

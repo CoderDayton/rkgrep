@@ -55,6 +55,10 @@ struct Extraction {
     comments_only: bool,
     /// Whether to resolve the column of every match.
     columns: bool,
+    /// Whether to keep each span's score breakdown.
+    explain: bool,
+    /// Lines returned either side of a match no declaration encloses.
+    orphan_context: u64,
     /// Matched lines recorded per file; see [`MAX_MATCH_LINES_PER_FILE`].
     max_match_lines: usize,
     /// Lines a declaration may span before a window into it is returned
@@ -70,6 +74,8 @@ impl Extraction {
         Self {
             comments_only: opts.comments_only,
             columns: opts.columns,
+            explain: opts.explain,
+            orphan_context: opts.orphan_context,
             max_match_lines: match opts.max_tokens {
                 Some(_) => MAX_MATCH_LINES_PER_FILE,
                 None => usize::MAX,
@@ -220,6 +226,7 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
         scanned.total_lines,
         queries,
         ex.max_declaration_lines,
+        ex.orphan_context,
     );
     let Some(texts) = region_texts(&file.absolute, &regions) else {
         return Vec::new();
@@ -235,7 +242,7 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
         let answered = region.answered();
         lowered.clear();
         lowered.extend(text.chars().flat_map(char::to_lowercase));
-        let score = span_score(
+        let reasons = span_score(
             &lowered,
             &queries[owner].terms,
             region.matched.len(),
@@ -260,7 +267,8 @@ fn spans_for_file(candidate: &Candidate, queries: &[Query], ex: &Extraction) -> 
             query: queries[owner].pattern.clone(),
             query_index: owner,
             tokens: OnceCell::new(),
-            score,
+            score: reasons.total(),
+            reasons: ex.explain.then_some(reasons),
             text,
         });
     }

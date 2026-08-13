@@ -15,7 +15,7 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 
 use crate::render::{render_json, render_text, render_vimgrep, Style};
-use crate::search::{search, Hit, Options, Select};
+use crate::search::{search, Hit, Options, Select, Tests, DEFAULT_ORPHAN_CONTEXT};
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum ColorChoice {
@@ -35,10 +35,11 @@ EXAMPLES:
   rkgrep -e Claims -e refresh        two symbols, one budget, answers alternating
   rkgrep -d validate_token           only where it is declared
   rkgrep -r validate_token           only where it is used
+  rkgrep -t py Config                Python only
   rkgrep --since main -C TODO        comments in what this branch changed
   rkgrep -l TODO | rkgrep --fetch -  survey cheaply, then read what matters
   rkgrep --vimgrep parse_url         every match, one jumpable line each
-  rkgrep -A validate_token           every ranked span, no budget
+  rkgrep -a validate_token           every ranked span, no budget
 
 The pattern is ripgrep's, unchanged, so ripgrep regex syntax applies. What
 rkgrep adds is ranking the hits, expanding each to the declaration around it,
@@ -86,6 +87,24 @@ struct Cli {
         help_heading = "Scoping"
     )]
     globs: Vec<String>,
+
+    /// Only files written in these languages, e.g. -t py,rust
+    #[arg(
+        short = 't',
+        long = "lang",
+        value_name = "LANG",
+        value_delimiter = ',',
+        help_heading = "Scoping"
+    )]
+    lang: Vec<String>,
+
+    /// Skip files that name themselves tests
+    #[arg(long, help_heading = "Scoping")]
+    no_tests: bool,
+
+    /// Only files that name themselves tests
+    #[arg(long, conflicts_with = "no_tests", help_heading = "Scoping")]
+    tests_only: bool,
 
     /// Search only the files listed in FILE, or on stdin for -
     #[arg(long, value_name = "FILE", help_heading = "Scoping")]
@@ -145,15 +164,25 @@ struct Cli {
     )]
     kind: Vec<String>,
 
+    /// Lines either side of a match no declaration encloses
+    #[arg(
+        short = 'O',
+        long,
+        value_name = "N",
+        default_value_t = DEFAULT_ORPHAN_CONTEXT,
+        help_heading = "Selection"
+    )]
+    orphan_context: u64,
+
     /// Token budget for the whole result set [default: 2000, none under
     /// --vimgrep]
-    #[arg(short = 't', long, value_name = "N", help_heading = "Budget")]
+    #[arg(short = 'b', long, value_name = "N", help_heading = "Budget")]
     max_tokens: Option<usize>,
 
     /// Return every ranked span: no token budget, and no per-file cap unless
     /// --max-per-file says otherwise
     #[arg(
-        short = 'A',
+        short = 'a',
         long,
         conflicts_with = "max_tokens",
         help_heading = "Budget"
@@ -173,9 +202,13 @@ struct Cli {
     line_numbers: bool,
 
     /// One line per match as path:line:col:text, for editors (every match,
-    /// unless -t sets a budget)
+    /// unless -b sets a budget)
     #[arg(long, conflicts_with = "json", help_heading = "Output")]
     vimgrep: bool,
+
+    /// Show what each span's score is made of
+    #[arg(long, help_heading = "Output")]
+    why: bool,
 
     /// Emit JSON
     #[arg(long, help_heading = "Output")]
@@ -249,6 +282,37 @@ impl Cli {
             _ => Select::All,
         }
     }
+
+    fn tests(&self) -> Tests {
+        match (self.no_tests, self.tests_only) {
+            (true, _) => Tests::Exclude,
+            (_, true) => Tests::Only,
+            _ => Tests::Include,
+        }
+    }
+}
+
+/// The extensions the `--lang` names select.
+///
+/// A name that is not a language is the caller's typo, and answering it with
+/// an empty result set would look like a repository with no Python in it.
+fn extensions(names: &[String]) -> Result<Vec<&'static str>, String> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for name in names {
+        let Some(found) = search::extensions_for(&name.to_ascii_lowercase()) else {
+            let known: Vec<&str> = search::language_names().collect();
+            return Err(format!(
+                "unknown language: {name}; try {}",
+                known.join(", ")
+            ));
+        };
+        for extension in found {
+            if !out.contains(extension) {
+                out.push(extension);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The files a run is restricted to, or `None` to walk the whole root.
@@ -332,7 +396,12 @@ fn report_gaps(patterns: &[String], found: &search::Results, kinds: &[String]) {
     }
 }
 
-fn options(cli: &Cli, paths: Option<Vec<PathBuf>>, budget: Option<usize>) -> Options {
+fn options(
+    cli: &Cli,
+    paths: Option<Vec<PathBuf>>,
+    budget: Option<usize>,
+    extensions: Vec<&'static str>,
+) -> Options {
     Options {
         max_tokens: budget,
         max_per_file: cli.max_per_file.unwrap_or(match budget {
@@ -346,6 +415,10 @@ fn options(cli: &Cli, paths: Option<Vec<PathBuf>>, budget: Option<usize>) -> Opt
         kinds: cli.kind.clone(),
         min_references: cli.min_references,
         columns: cli.vimgrep,
+        explain: cli.why,
+        extensions,
+        tests: cli.tests(),
+        orphan_context: cli.orphan_context,
         literal: cli.fixed_strings,
         word: cli.word_regexp,
         ignore_case: cli.ignore_case,
@@ -384,28 +457,8 @@ fn print_stats(found: &search::Results, budget: Option<usize>, started: Instant)
     );
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let started = Instant::now();
-    tokenizer::prewarm();
-
-    let use_color = match cli.color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => io::stdout().is_terminal(),
-    };
-    let budget = cli.budget();
-    let mut style = Style {
-        text: !cli.anchors_only,
-        color: use_color,
-        line_numbers: cli.line_numbers,
-        queries: false,
-    };
-
-    if !cli.fetch.is_empty() {
-        return run_fetch(&cli, style, budget);
-    }
-
+/// A pattern and a tree: walk it, rank what matched, print what fits.
+fn run_search(cli: &Cli, mut style: Style, budget: Option<usize>, started: Instant) -> ExitCode {
     let (patterns, path) = match cli.patterns_and_path() {
         Ok(resolved) => resolved,
         Err(message) => {
@@ -422,7 +475,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let paths = match path_set(&cli, &root) {
+    let paths = match path_set(cli, &root) {
         Ok(paths) => paths,
         Err(err) => {
             eprintln!("rkgrep: {err:#}");
@@ -430,7 +483,15 @@ fn main() -> ExitCode {
         }
     };
 
-    let opts = options(&cli, paths, budget);
+    let extensions = match extensions(&cli.lang) {
+        Ok(extensions) => extensions,
+        Err(message) => {
+            eprintln!("rkgrep: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let opts = options(cli, paths, budget, extensions);
 
     let mut found = match search(&patterns, &root, &opts) {
         Ok(found) => found,
@@ -461,4 +522,30 @@ fn main() -> ExitCode {
     }
 
     exit_code(&found.hits)
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let started = Instant::now();
+    tokenizer::prewarm();
+
+    let use_color = match cli.color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => io::stdout().is_terminal(),
+    };
+    let budget = cli.budget();
+    let style = Style {
+        text: !cli.anchors_only,
+        color: use_color,
+        line_numbers: cli.line_numbers,
+        queries: false,
+        why: cli.why,
+    };
+
+    if !cli.fetch.is_empty() {
+        return run_fetch(&cli, style, budget);
+    }
+
+    run_search(&cli, style, budget, started)
 }

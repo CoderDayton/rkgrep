@@ -234,7 +234,7 @@ fn min_references_keeps_room_for_usage() {
     let dir = crowded();
     let plain = json(
         dir.path(),
-        &["-t", "450", "--max-per-file", "0", "validate_token"],
+        &["-b", "450", "--max-per-file", "0", "validate_token"],
     );
     assert_eq!(
         reference_count(&plain),
@@ -245,7 +245,7 @@ fn min_references_keeps_room_for_usage() {
     let held = json(
         dir.path(),
         &[
-            "-t",
+            "-b",
             "450",
             "--max-per-file",
             "0",
@@ -472,12 +472,12 @@ fn vimgrep_enumerates_every_match_rather_than_filling_a_budget() {
     let every = stdout(dir.path(), &["--vimgrep", "-w", "validate_token"]);
     let budgeted = stdout(
         dir.path(),
-        &["--vimgrep", "-t", "120", "-w", "validate_token"],
+        &["--vimgrep", "-b", "120", "-w", "validate_token"],
     );
     assert_eq!(every.lines().count(), 4, "{every:?}");
     assert!(
         budgeted.lines().count() < every.lines().count(),
-        "an explicit -t still binds: {budgeted:?}"
+        "an explicit -b still binds: {budgeted:?}"
     );
 }
 
@@ -545,4 +545,124 @@ fn one_pattern_reads_the_same_written_either_way() {
     assert_eq!(positional, flagged);
     // One pattern names no queries in the header; several do.
     assert!(!positional.contains(" for validate_token"));
+}
+
+/// One symbol written in four languages, one of which is its test.
+fn mixed() -> TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (rel, body) in [
+        (
+            "src/auth.py",
+            "def validate_token(token):\n    return bool(token)\n",
+        ),
+        (
+            "src/auth.rs",
+            "fn validate_token(token: &str) -> bool {\n    !token.is_empty()\n}\n",
+        ),
+        (
+            "src/auth.js",
+            "function validate_token(token) {\n    return Boolean(token);\n}\n",
+        ),
+        (
+            "tests/auth_test.py",
+            "def test_it():\n    assert validate_token(\"x\")\n",
+        ),
+    ] {
+        let path = dir.path().join(rel);
+        fs::create_dir_all(path.parent().expect("has a parent")).expect("mkdir");
+        fs::write(path, body).expect("write");
+    }
+    dir
+}
+
+fn paths_of(hits: &[serde_json::Value]) -> Vec<String> {
+    hits.iter()
+        .map(|hit| hit["path"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+#[test]
+fn lang_keeps_only_the_files_that_language_is_written_in() {
+    let dir = mixed();
+    let python = paths_of(&json(dir.path(), &["-t", "py", "-w", "validate_token"]));
+    assert!(!python.is_empty());
+    assert!(
+        python.iter().all(|path| path.ends_with(".py")),
+        "{python:?}"
+    );
+
+    let both = paths_of(&json(
+        dir.path(),
+        &["-t", "py,rust", "-w", "validate_token"],
+    ));
+    assert!(both.contains(&"src/auth.rs".to_string()), "{both:?}");
+    assert!(!both.iter().any(|path| path.ends_with(".js")), "{both:?}");
+}
+
+/// A language nobody wrote the tree in and a language that does not exist look
+/// the same from the caller's side unless one of them is an error.
+#[test]
+fn an_unknown_language_is_refused_rather_than_answered_empty() {
+    let dir = mixed();
+    let (out, err, code) = run(dir.path(), &["-t", "cobol", "validate_token"], None);
+    assert_eq!(code, 2, "{out:?}");
+    assert!(err.contains("unknown language"), "{err:?}");
+    assert!(out.is_empty(), "{out:?}");
+}
+
+#[test]
+fn tests_are_dropped_or_returned_on_their_own() {
+    let dir = mixed();
+    let without = paths_of(&json(dir.path(), &["--no-tests", "-w", "validate_token"]));
+    assert!(!without.is_empty());
+    assert!(
+        !without.iter().any(|path| path.contains("auth_test")),
+        "{without:?}"
+    );
+
+    let only = paths_of(&json(dir.path(), &["--tests-only", "-w", "validate_token"]));
+    assert_eq!(only, vec!["tests/auth_test.py".to_string()]);
+}
+
+/// Twenty flat lines with the match in the middle: no declaration encloses it,
+/// so the window is the whole of what decides the span.
+fn flat() -> TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let body: String = (1..=21)
+        .map(|line| match line {
+            11 => "check(TIMEOUT)\n",
+            _ => "pass\n",
+        })
+        .collect();
+    fs::write(dir.path().join("flat.py"), body).expect("write");
+    dir
+}
+
+#[test]
+fn orphan_context_sets_the_window_around_a_match_nothing_declares() {
+    let dir = flat();
+    for context in [1u64, 4] {
+        let hits = json(dir.path(), &["-O", &context.to_string(), "TIMEOUT"]);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0]["start_line"].as_u64(), Some(11 - context));
+        assert_eq!(hits[0]["end_line"].as_u64(), Some(11 + context));
+    }
+}
+
+#[test]
+fn why_shows_what_a_score_is_made_of() {
+    let dir = tree();
+    let out = stdout(dir.path(), &["--why", "-w", "validate_token"]);
+    assert!(out.contains("why matches "), "{out:?}");
+
+    let hits = json(dir.path(), &["--why", "-w", "validate_token"]);
+    let why = &hits[0]["why"];
+    let part = |name: &str| why[name].as_f64().expect("a number");
+    let total = part("matches") + part("terms") + part("path") - part("depth_penalty");
+    let score = hits[0]["score"].as_f64().expect("a score");
+    assert!((total - score).abs() < 1e-9, "{why:?} against {score}");
+
+    // Nothing asked, nothing carried.
+    let quiet = json(dir.path(), &["-w", "validate_token"]);
+    assert!(quiet[0]["why"].is_null(), "{:?}", quiet[0]);
 }

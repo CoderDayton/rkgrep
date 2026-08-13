@@ -7,7 +7,7 @@
 
 use std::io::{self, Write};
 
-use crate::search::Hit;
+use crate::search::{Hit, Reasons};
 
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -27,6 +27,8 @@ pub struct Style {
     pub line_numbers: bool,
     /// Name the pattern each span answers, for a run that carried several.
     pub queries: bool,
+    /// Show what each span's score is made of.
+    pub why: bool,
 }
 
 /// Anchored, model-readable rendering of a result set.
@@ -52,6 +54,9 @@ pub fn render_text(out: &mut impl Write, hits: &[Hit], style: Style) -> io::Resu
             chunk.push_str(&format!(" {dim}for {}{reset}", hit.query));
         }
         chunk.push('\n');
+        if let (true, Some(reasons)) = (style.why, &hit.reasons) {
+            push_reasons(&mut chunk, hit, reasons, style);
+        }
         if style.text {
             push_source(&mut chunk, hit, style);
         }
@@ -65,6 +70,29 @@ pub fn render_text(out: &mut impl Write, hits: &[Hit], style: Style) -> io::Resu
         out.write_all(chunk.as_bytes())?;
     }
     Ok(())
+}
+
+/// Why one span scored what it did, written as the sum it is.
+///
+/// Declarations sort ahead of everything else whatever they score, so a span
+/// that got there that way says so: the number alone would not explain it.
+fn push_reasons(out: &mut String, hit: &Hit, reasons: &Reasons, style: Style) {
+    let (dim, reset) = match style.color {
+        true => (DIM, RESET),
+        false => ("", ""),
+    };
+    let first = match hit.is_declaration {
+        true => ", declaration",
+        false => "",
+    };
+    out.push_str(&format!(
+        "{dim}  why matches {:.2} + terms {:.2} + path {:.2} - depth {:.2} = {:.2}{first}{reset}\n",
+        reasons.matches,
+        reasons.terms,
+        reasons.path,
+        reasons.depth_penalty,
+        reasons.total(),
+    ));
 }
 
 /// A span's source, with its matched lines told apart from the rest.
