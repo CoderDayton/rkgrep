@@ -4,8 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 
-Ranked, span-scoped, budget-packed code search. ripgrep answers *which lines
-match*; rkgrep answers *what should be read*.
+Ranked, span-scoped, budget-packed code search. ripgrep tells you which lines
+match. rkgrep tells you what to read.
 
 Point it at a symbol and you get whole declarations back: the function or class
 each match sits in, ranked best first and packed into a token budget you set. A
@@ -39,10 +39,10 @@ Docs: [CLI](docs/cli.md) · [Architecture](docs/architecture.md) ·
 
 ## Features
 
-- Declarations rank first: a file that declares the symbol outranks one that
+- Declarations rank first. A file that declares the symbol outranks one that
   mentions it twenty times.
-- A match expands to its declaration rather than ±N lines, and overlapping
-  regions merge, so no line is sent twice.
+- A match expands to its declaration instead of ±N lines. Overlapping regions
+  merge, so no line arrives twice.
 - Spans pack under `--max-tokens` best-first: 2000 by default, at most 3 per
   file, so one crowded module cannot take the budget. The budget is counted in
   `o200k_base` tokens from a bundled vocabulary — the same unit the context
